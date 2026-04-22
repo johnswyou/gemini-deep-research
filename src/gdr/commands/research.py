@@ -1,22 +1,9 @@
 """The primary ``gdr research <query>`` command.
 
-Phase 3 scope (polling-only MVP):
-
-* Accept the query and a small set of flags (``--max``, ``--output``,
-  ``--dry-run``, ``--api-key``, ``--no-confirm``, ``--config``).
-* Load TOML config, resolve the API key, build a ``RunContext``.
-* Build create() kwargs via :mod:`gdr.core.requests`.
-* On ``--dry-run``, print the kwargs as JSON and exit without hitting the
-  API.
-* Otherwise: submit the interaction, poll to completion with a live
-  status line, render artifacts (report.md / sources.json / metadata.json
-  / transcript.json), append a Record to the local store, and print the
-  paths.
-
-Streaming (Phase 4), collaborative planning (Phase 5), tool/MCP/multimodal
-flags (Phase 6), history commands (Phase 7), and operator commands
-(Phase 8) hook in without touching this file's core flow — they extend
-``RunContext`` construction and wrap the polling call.
+The Typer entry point (:func:`run`) is a thin wrapper that parses flags
+and delegates to :func:`execute_research`, which is also imported by
+:mod:`gdr.commands.plan` so ``gdr plan approve <id>`` reuses the full
+submit → stream/poll → render pipeline.
 """
 
 from __future__ import annotations
@@ -37,6 +24,7 @@ from gdr.constants import AGENT_FAST, AGENT_MAX, TERMINAL_STATUSES
 from gdr.core.client import GdrClient
 from gdr.core.models import AgentConfig, Record, RunContext
 from gdr.core.persistence import JsonlStore, Store
+from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
 from gdr.core.requests import build_create_kwargs
 from gdr.core.security import SecurityPolicy, sanitize_slug
@@ -87,6 +75,16 @@ def _allocate_output_dir(
     return policy.confine(candidate)
 
 
+def _resolve_agent(config: Config, *, use_max: bool) -> str:
+    if use_max:
+        return AGENT_MAX
+    if config.default_agent not in (AGENT_FAST, AGENT_MAX):
+        # Allow unknown ids from config (Google may release new agents), but
+        # still honor them as-is.
+        return config.default_agent
+    return config.default_agent
+
+
 def _build_run_context(
     *,
     query: str,
@@ -94,19 +92,11 @@ def _build_run_context(
     use_max: bool,
     output_dir: Path,
     stream: bool,
+    previous_interaction_id: str | None = None,
 ) -> RunContext:
-    agent = AGENT_MAX if use_max else config.default_agent
-    if use_max:
-        # Respect explicit CLI choice even when config points at something else.
-        agent = AGENT_MAX
-    elif config.default_agent not in (AGENT_FAST, AGENT_MAX):
-        # Allow unknown ids from config (Google may release new agents), but
-        # fall back to the documented fast agent when config is truly empty.
-        agent = config.default_agent
-
     return RunContext(
         query=query,
-        agent=agent,
+        agent=_resolve_agent(config, use_max=use_max),
         builtin_tools=config.default_tools,
         output_dir=output_dir,
         stream=stream,
@@ -116,6 +106,7 @@ def _build_run_context(
             visualization=config.visualization,  # type: ignore[arg-type]
             collaborative_planning=False,
         ),
+        previous_interaction_id=previous_interaction_id,
         confirm_max=config.confirm_max,
         auto_open=config.auto_open,
     )
@@ -136,6 +127,11 @@ def run(
     query: str = typer.Argument(..., help="Your research question."),
     use_max: bool = typer.Option(
         False, "--max", help="Use Deep Research Max (higher quality, longer runtime, higher cost)."
+    ),
+    use_plan: bool = typer.Option(
+        False,
+        "--plan",
+        help="Review and refine the agent's plan before it runs the research.",
     ),
     stream: bool | None = typer.Option(
         None,
@@ -166,24 +162,102 @@ def run(
     config = load_config(path=config_path)
     use_stream = _default_stream_preference() if stream is None else stream
 
-    # For --dry-run we don't need network or API key. Build the kwargs with
-    # a synthetic output_dir that passes validation but doesn't need to exist.
-    dry_output = output if output is not None else config.output_dir / "(dry-run)"
+    # --plan kicks off the interactive planning loop before we hit the
+    # execution path. The user's query becomes the seed input for the
+    # planning phase; we feed the approved plan id into execute_research
+    # below so the final run inherits plan context.
+    previous_interaction_id: str | None = None
+    approve_input: str | None = None
+    if use_plan and not dry_run:
+        client = _safe_build_client(console, api_key=api_key, config=config)
+        plan_id = interactive_plan_loop(
+            client,
+            initial_query=query,
+            agent=_resolve_agent(config, use_max=use_max),
+            console=console,
+        )
+        if plan_id is None:
+            console.print("[yellow]Plan cancelled.[/yellow]")
+            raise typer.Exit(code=0)
+        previous_interaction_id = plan_id
+        approve_input = "Plan looks good!"
+        console.print(f"[green]Plan approved.[/green]  id=[dim]{plan_id}[/dim]")
+
+    execute_research(
+        config=config,
+        display_query=query,
+        use_max=use_max,
+        use_stream=use_stream,
+        output=output,
+        api_key=api_key,
+        no_confirm=no_confirm,
+        console=console,
+        dry_run=dry_run,
+        previous_interaction_id=previous_interaction_id,
+        api_input=approve_input,
+        plan_mode_for_dry_run=use_plan,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public helper — reused by gdr.commands.plan.approve_cmd
+# ---------------------------------------------------------------------------
+
+
+def execute_research(
+    *,
+    config: Config,
+    display_query: str,
+    use_max: bool,
+    use_stream: bool,
+    output: Path | None,
+    api_key: str | None,
+    no_confirm: bool,
+    console: Console,
+    dry_run: bool = False,
+    previous_interaction_id: str | None = None,
+    api_input: str | None = None,
+    plan_mode_for_dry_run: bool = False,
+) -> None:
+    """Run the full submit → stream/poll → render pipeline.
+
+    Shared between ``gdr research`` (with or without ``--plan``) and
+    ``gdr plan approve``. When ``previous_interaction_id`` is set, the
+    created interaction inherits the plan context and ``api_input``
+    (typically ``"Plan looks good!"``) replaces the display query on the
+    wire.
+
+    ``plan_mode_for_dry_run`` is set by ``run`` when ``--plan --dry-run``
+    is combined; it makes the printed kwargs describe the *plan* phase
+    rather than the execution phase, so users see what the planning call
+    would look like.
+    """
     policy = SecurityPolicy(
         output_root=config.output_dir,
         safe_untrusted=config.safe_untrusted,
         untrusted=False,
     )
 
+    # For --dry-run we don't need network or API key. The synthetic
+    # output_dir needs to pass validation but doesn't need to exist.
+    dry_output = output if output is not None else config.output_dir / "(dry-run)"
+
     try:
-        ctx_for_dry = _build_run_context(
-            query=query,
+        ctx_for_kwargs = _build_run_context(
+            query=display_query,
             config=config,
             use_max=use_max,
             output_dir=dry_output,
             stream=use_stream,
+            previous_interaction_id=previous_interaction_id,
         )
-        kwargs, stripped = build_create_kwargs(ctx_for_dry, policy)
+        kwargs, stripped = _build_request_kwargs(
+            ctx_for_kwargs,
+            policy,
+            api_input=api_input,
+            plan_mode_for_dry_run=plan_mode_for_dry_run,
+            dry_run=dry_run,
+        )
     except ConfigError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc
@@ -198,19 +272,20 @@ def run(
         return
 
     # Max confirmation gate — skip when the user has opted out either per-run
-    # (--no-confirm) or globally (confirm_max = false in config).
-    if use_max and ctx_for_dry.confirm_max and not no_confirm and not _confirm_max(console):
+    # (--no-confirm) or globally (confirm_max = false in config). Also skip
+    # when we're continuing from an approved plan — they've already
+    # consented.
+    if (
+        use_max
+        and ctx_for_kwargs.confirm_max
+        and not no_confirm
+        and previous_interaction_id is None
+        and not _confirm_max(console)
+    ):
         console.print("[yellow]Aborted.[/yellow]")
         raise typer.Exit(code=0)
 
-    import os  # noqa: PLC0415 — only needed for API key env lookup
-
-    resolved_key = _resolve_api_key(api_key, dict(os.environ), config)
-    try:
-        client = GdrClient(api_key=resolved_key)
-    except ConfigError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(code=exc.exit_code) from exc
+    client = _safe_build_client(console, api_key=api_key, config=config)
 
     started_at = datetime.now(_UTC)
     try:
@@ -224,7 +299,7 @@ def run(
             create_result,
             use_stream=use_stream,
             console=console,
-            query=query,
+            query=display_query,
         )
     except StreamError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -238,17 +313,14 @@ def run(
 
     final_output_dir = _allocate_output_dir(
         root=config.output_dir,
-        query=query,
+        query=display_query,
         interaction_id=interaction_id,
         started_at=started_at,
         override=output,
         policy=policy,
     )
 
-    # Rebuild RunContext with the actual output_dir so rendering sees the
-    # right value. (We used a synthetic one above because the interaction id
-    # wasn't known yet.)
-    ctx = ctx_for_dry.model_copy(update={"output_dir": final_output_dir})
+    ctx = ctx_for_kwargs.model_copy(update={"output_dir": final_output_dir})
 
     _finalize_and_render(
         client=client,
@@ -258,8 +330,47 @@ def run(
         policy=policy,
         started_at=started_at,
         console=console,
-        query=query,
+        query=display_query,
     )
+
+
+def _build_request_kwargs(
+    ctx: RunContext,
+    policy: SecurityPolicy,
+    *,
+    api_input: str | None,
+    plan_mode_for_dry_run: bool,
+    dry_run: bool,
+) -> tuple[dict[str, Any], list[str]]:
+    """Build create() kwargs with optional api_input override and plan-mode
+    preview for --dry-run.
+
+    When ``plan_mode_for_dry_run`` is True (set only by --plan --dry-run),
+    we show what the first *plan* request would look like instead of the
+    execution request, since that's what we'd actually send first.
+    """
+    if plan_mode_for_dry_run and dry_run:
+        from gdr.core.planning import PlanRequest, build_plan_kwargs  # noqa: PLC0415 — lazy
+
+        req = PlanRequest(input_text=ctx.query, agent=ctx.agent)
+        return build_plan_kwargs(req), []
+
+    kwargs, stripped = build_create_kwargs(ctx, policy)
+    if api_input is not None:
+        kwargs["input"] = api_input
+    return kwargs, stripped
+
+
+def _safe_build_client(console: Console, *, api_key: str | None, config: Config) -> GdrClient:
+    """Build a GdrClient with clear error messaging."""
+    import os  # noqa: PLC0415 — only needed for API key env lookup
+
+    resolved_key = _resolve_api_key(api_key, dict(os.environ), config)
+    try:
+        return GdrClient(api_key=resolved_key)
+    except ConfigError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=exc.exit_code) from exc
 
 
 # ---------------------------------------------------------------------------

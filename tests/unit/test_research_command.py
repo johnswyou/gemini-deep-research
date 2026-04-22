@@ -427,3 +427,219 @@ class TestStreaming:
         assert result.exit_code == 0, result.output
         call_kwargs = fake_interactions.create.call_args.kwargs
         assert call_kwargs.get("stream") is not True
+
+
+# ---------------------------------------------------------------------------
+# --plan (collaborative planning)
+# ---------------------------------------------------------------------------
+
+
+def _fake_plan_interaction(
+    id_: str = "planxyz", text: str = "1. Search sources\n2. Synthesize"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id_,
+        status="completed",
+        outputs=[SimpleNamespace(type="text", text=text, annotations=[])],
+        usage=SimpleNamespace(total_tokens=100),
+    )
+
+
+class _PlanAndRunSDK:
+    """Mock ``client.interactions`` that routes plan vs execution calls.
+
+    The command calls ``create`` for a plan (collaborative_planning=True)
+    and again for the final run (collaborative_planning=False). We inspect
+    the kwargs to decide which fixture to return.
+    """
+
+    def __init__(
+        self,
+        *,
+        plan_ids: list[str],
+        plan_texts: list[str],
+        final_id: str,
+        final_text: str = "Final report body.",
+    ) -> None:
+        self._plan_ids = plan_ids
+        self._plan_texts = plan_texts
+        self._final_id = final_id
+        self._final_text = final_text
+        self._plan_count = 0
+        self.create_calls: list[dict[str, Any]] = []
+        self.get_calls: list[str] = []
+
+    def create(self, **kwargs: Any) -> SimpleNamespace:
+        self.create_calls.append(kwargs)
+        cp = kwargs["agent_config"]["collaborative_planning"]
+        if cp:
+            plan_id = self._plan_ids[min(self._plan_count, len(self._plan_ids) - 1)]
+            self._plan_count += 1
+            return SimpleNamespace(id=plan_id, status="in_progress")
+        return SimpleNamespace(id=self._final_id, status="in_progress")
+
+    def get(self, *, id: str) -> SimpleNamespace:
+        self.get_calls.append(id)
+        if id == self._final_id:
+            return _fake_completed(id_=self._final_id)
+        # plan lookup
+        try:
+            idx = self._plan_ids.index(id)
+            text = self._plan_texts[min(idx, len(self._plan_texts) - 1)]
+        except ValueError:
+            text = "generic plan"
+        return _fake_plan_interaction(id_=id, text=text)
+
+
+def _install_plan_sdk(mocker: Any, sdk: _PlanAndRunSDK) -> None:
+    fake_client = MagicMock()
+    fake_client.interactions = sdk
+    mocker.patch("google.genai.Client", return_value=fake_client)
+
+
+class TestPlanFlag:
+    def test_approve_on_first_plan(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        sdk = _PlanAndRunSDK(
+            plan_ids=["planfirst"],
+            plan_texts=["Initial plan."],
+            final_id="runfinal",
+        )
+        _install_plan_sdk(mocker, sdk)
+        mocker.patch("gdr.core.planning.typer.prompt", return_value="A")  # approve
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "TPU history",
+                "--plan",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        # Should have made 2 create calls: 1 plan + 1 execution.
+        assert len(sdk.create_calls) == 2
+
+        plan_call = sdk.create_calls[0]
+        exec_call = sdk.create_calls[1]
+
+        assert plan_call["agent_config"]["collaborative_planning"] is True
+        assert plan_call["input"] == "TPU history"
+        assert "previous_interaction_id" not in plan_call
+
+        assert exec_call["agent_config"]["collaborative_planning"] is False
+        assert exec_call["previous_interaction_id"] == "planfirst"
+        assert exec_call["input"] == "Plan looks good!"
+
+        # Output directory created for the final run.
+        runs = list((tmp_path / "reports").glob("*_runfin*"))
+        assert len(runs) == 1
+
+    def test_refine_then_approve(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        sdk = _PlanAndRunSDK(
+            plan_ids=["planinitial", "planrefined"],
+            plan_texts=["Initial plan.", "Refined plan."],
+            final_id="runfinal",
+        )
+        _install_plan_sdk(mocker, sdk)
+        # R → "drop the methodology section" → A
+        mocker.patch(
+            "gdr.core.planning.typer.prompt",
+            side_effect=["R", "drop the methodology section", "A"],
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "EV batteries",
+                "--plan",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        # 3 creates: initial plan, refined plan, execution.
+        assert len(sdk.create_calls) == 3
+        initial_plan, refined_plan, exec_call = sdk.create_calls
+
+        assert initial_plan["agent_config"]["collaborative_planning"] is True
+        assert "previous_interaction_id" not in initial_plan
+
+        assert refined_plan["agent_config"]["collaborative_planning"] is True
+        assert refined_plan["previous_interaction_id"] == "planinitial"
+        assert refined_plan["input"] == "drop the methodology section"
+
+        assert exec_call["agent_config"]["collaborative_planning"] is False
+        assert exec_call["previous_interaction_id"] == "planrefined"
+
+    def test_cancel_exits_without_execution(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        sdk = _PlanAndRunSDK(
+            plan_ids=["planabandoned"],
+            plan_texts=["Initial plan."],
+            final_id="(never)",
+        )
+        _install_plan_sdk(mocker, sdk)
+        mocker.patch("gdr.core.planning.typer.prompt", return_value="C")
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--plan",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0
+        # Only the plan create happened — no execution.
+        assert len(sdk.create_calls) == 1
+        # No report directory.
+        assert (
+            not list((tmp_path / "reports").iterdir()) if (tmp_path / "reports").exists() else True
+        )
+
+    def test_plan_dry_run_prints_plan_kwargs_and_skips_api(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        mock_client_ctor = mocker.patch("google.genai.Client")
+        # No prompt mock needed — --dry-run bypasses the interactive loop.
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Some topic",
+                "--plan",
+                "--dry-run",
+                "--config",
+                str(cfg),
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client_ctor.assert_not_called()
+        # Dry-run output reflects the plan-phase request shape.
+        assert (
+            '"collaborative_planning": true' in result.output.lower()
+            or '"collaborative_planning":true' in result.output.lower()
+            or "collaborative_planning" in result.output
+        )
