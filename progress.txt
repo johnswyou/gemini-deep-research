@@ -1,0 +1,398 @@
+# Project: gdr — Gemini Deep Research CLI
+
+Python 3.10+ CLI wrapping Google's Deep Research / Deep Research Max via
+the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`.
+
+**Authoritative plan:** `/Users/john.you/.claude/plans/sunny-hopping-crown.md`
+(10 phases total; phases 1-6 complete, phase 7 next).
+
+---
+
+## Codebase Patterns
+
+Read this section BEFORE editing. Rules discovered the hard way — don't
+re-learn them.
+
+### Tooling / lint
+- **Ruff bugbear B008:** Typer's `typer.Option(...)` / `typer.Argument(...)`
+  in default values trip B008. Fixed via
+  `[tool.ruff.lint.flake8-bugbear] extend-immutable-calls = ["typer.Option", "typer.Argument"]`
+  in `pyproject.toml`. DO NOT add `# noqa: B008` — use this config.
+- **Ruff PLC0415 (import not at top):** only two exceptions are allowed
+  project-wide. (a) `from google import genai` is lazy-imported inside
+  `GdrClient.__init__` so `gdr --help` / `--version` stay fast. Use
+  `# noqa: PLC0415` with a comment. (b) `src/gdr/cli.py` has a per-file
+  ignore for PLC0415 (declared in `pyproject.toml`).
+- **Ruff RUF001/RUF003 (ambiguous unicode):** en-dash `–` trips in strings
+  and comments. Use ASCII hyphen `-`. Em-dash in docstrings is fine per
+  existing code (they're not flagged).
+- **Ruff RUF100 (unused noqa):** `A002` and `BLE001` are NOT in the lint
+  set — don't add noqa for them.
+- **Ruff PLR0915 (too many statements):** the 50-statement limit catches
+  `run()` easily. Extract helpers like `_finalize_and_render`,
+  `_consume_create_result`, `_safe_build_client`.
+- **Ruff PLW2901 (for-loop var reassignment):** rename `stripped = line.strip()`
+  to avoid reassigning loop var `line`.
+- **Ruff RUF059 (unused unpack):** prefix unused tuple members with `_`:
+  `agg, _events = _collect(...)`.
+- **Ruff E402 (imports not at top):** don't put module-level assignments
+  (like `_UTC = timezone.utc`) between imports. Put them after ALL imports.
+
+### mypy (strict, target py310)
+- `datetime.UTC` is 3.11+. Use `from datetime import timezone` and
+  `timezone.utc` (aliased as `_UTC = timezone.utc` at module scope, after
+  imports). This is project-wide.
+- `tomli` import has a mypy override (only imported on 3.10 branch) in
+  pyproject.
+- google.genai has a mypy override (ignore_missing_imports).
+- Function naming collision: `Store.list` shadows the builtin `list` in
+  class scope, breaking `list[Record]` annotations. This class uses
+  `Store.recent(...)` instead. DO NOT rename back.
+- Cast `policy.redact(raw)` to `dict[str, Any]` — the redactor returns
+  `Any` generically.
+
+### Domain architecture
+- **`execute_research()` is the shared execution pipeline.** Both
+  `gdr research` (with/without `--plan`) and `gdr plan approve` call it.
+  Do NOT duplicate create/poll/render logic. The function accepts
+  `previous_interaction_id` and `api_input` for plan-approval cases.
+  As of Phase 6 it also accepts derived-domain kwargs
+  (`builtin_tools`, `mcp_servers`, `file_search`, `input_parts`,
+  `visualization`, `untrusted_input`). The CLI layer parses flags via
+  `core/inputs.py` into these types — keep parsing out of
+  `execute_research`.
+- **`core/inputs.py` is where CLI flags become domain objects.** Every
+  parser raises `ConfigError` (never bare `ValueError`), so the CLI's
+  try/except → exit code 4 is uniform. `commands/research.py` stays lean
+  by delegating all flag parsing here.
+- **Auto-untrusted mode fires from `--file` or `--url`** when
+  `config.safe_untrusted=True` (the default). `--untrusted-input` also
+  trips it manually. The resulting `SecurityPolicy(untrusted=True)` is
+  the single place tools get filtered (`code_execution`, `mcp_server`).
+  `file_search` is considered safe and stays.
+- **Tool ordering in the wire shape is contractual:** builtin simple
+  tools → `file_search` → `mcp_server`. Tests assert this explicitly
+  (`TestCombinedToolsAndMultimodal`). Reordering changes how dry-runs
+  and fixtures look downstream.
+- **--mcp-header splits on FIRST `:`** so values like `Bearer abc:123`
+  survive. `str.partition("=")` then `str.partition(":")` on the rest.
+- **--file-search-store accepts bare names**; the CLI prepends
+  `fileSearchStores/`. `FileSearchSpec` still enforces the prefix, so
+  config-TOML users get the same guarantee.
+- **Auto-append `url_context` tool** when `--url` is used *and* the user
+  overrode `--tool`. Handled in `_parse_flag_inputs` via
+  `ensure_url_context_tool`. Config defaults already include
+  `url_context`, so the branch is only hit when the user narrows tools.
+- **Attribute-then-key `_get` helper** appears in three modules
+  (`rendering.py`, `streaming.py`, `planning.py`). It bridges SDK typed
+  objects (attribute access) and dict-shaped test mocks (key access) so
+  tests can pass `SimpleNamespace` OR `dict` without a separate adapter.
+- **Stream contract:** `interaction.complete` during streaming has
+  `outputs=None` per Google's docs. The research command ALWAYS calls
+  `.get(id=...)` after the stream ends — whether cleanly or by
+  disconnect — to get authoritative outputs. Partial buffers are
+  discarded on disconnect. Never reconstruct reports from the stream.
+- **MCP header validation is eager.** `build_tools()` validates headers
+  BEFORE any wire-shape assembly. One bad header aborts the whole
+  request so partial kwargs never reach the API.
+- **Untrusted-mode tool filtering runs LAST** in `build_tools()` so the
+  `stripped` return list reflects what would actually have been sent.
+- **Collaborative planning kwargs are minimal.** `build_plan_kwargs()`
+  sets `thinking_summaries="none"` and `visualization="off"` — plans
+  should return fast; streaming UI adds no value.
+
+### Rendering
+- When printing streamed text, use `console.print(text, end="",
+  highlight=False, markup=False, soft_wrap=True)`. Model output may
+  contain `[bold]` brackets that would otherwise crash Rich's markup
+  parser.
+- Text delta buffer in `LiveRenderer` flushes on newline. Use
+  `finish()` at end of stream to empty the tail buffer.
+- Use Rich's `Status` (not `Live`) for polling spinners — `Live` owns
+  the viewport and wipes streamed prints above it.
+- **Image outputs are extracted defensively.** `extract_images()` skips
+  entries with missing `data` or unparseable base64 so garbage on the
+  wire never aborts the full render. The raw transcript still captures
+  the original payload for debugging.
+- **Image filenames are `image_NNN<.ext>`** (3-digit zero-padded),
+  extension from `mimetypes.guess_extension(mime)` with `.png` fallback.
+  stdlib may pick `.jpe` for `image/jpeg`; tests check only the prefix.
+- **Images section goes *between* body and Sources** in `report.md` —
+  tests assert "## Images" before "## Sources" ordering.
+
+### Storage + paths
+- Store: `$GDR_STATE_DIR` → `$XDG_STATE_HOME/gdr/` → `~/.local/state/gdr/`.
+- Config: `$GDR_CONFIG_PATH` → `$XDG_CONFIG_HOME/gdr/config.toml` →
+  `~/.config/gdr/config.toml`.
+- Intentionally NOT using `platformdirs` — predictability over platform
+  idiom for terminal tooling.
+- `env:VAR` in TOML is **prefix-only** (`"env:TOKEN"` works;
+  `"Bearer env:TOKEN"` does not). Tested + documented contract.
+- Slug sanitization: `[^a-z0-9]+ → -`, max 64 chars, empty falls back to
+  `"query"`. id6 fragment (first 6 alnum of interaction id) appended.
+  Dashes in id strip out — test IDs in fixtures use dash-free strings
+  (`"intabcxyz123"`) so `intabc` is predictable.
+
+### Testing
+- Fake the SDK at `google.genai.Client` via `mocker.patch`. Tests pass
+  `SimpleNamespace` or `MagicMock` objects; the `_get` helpers accept
+  both shapes. See `tests/unit/test_research_command.py::_install_fake_sdk`.
+- Golden-file fixtures for streaming live in
+  `tests/fixtures/streams/*.jsonl` (one JSON event per line). These
+  cover happy path / mid-stream error / out-of-order / disconnect /
+  interleaved content.
+- Mock `typer.prompt` via `mocker.patch("gdr.core.planning.typer.prompt",
+  side_effect=[...])` for interactive-loop tests.
+- Rich output capture: `Console(file=io.StringIO(), record=True,
+  force_terminal=False, width=120)` then `console.export_text()`.
+- All command tests use an autouse `_isolated_env` fixture setting
+  `GDR_STATE_DIR` and `GDR_CONFIG_PATH` to tmp_path so tests never
+  touch real user state.
+
+### Git / commit conventions
+- Attribution is disabled globally per user's settings. Do NOT add
+  `Co-Authored-By: Claude` — the commit message rule explicitly omits
+  it. Commit body format: `<type>: <description>\n\n<body>`. Types used
+  so far: `chore`, `feat`, `feat(core)`. One phase = one commit.
+
+---
+
+## Current state (as of Phase 6 complete)
+
+### Commits
+```
+<Phase 6 commit hash> feat: tools, MCP, multimodal inputs, visualization (Phase 6)
+6ee27e9 feat: collaborative planning flow                (Phase 5)
+d4f128d feat: streaming with live thought summaries...    (Phase 4)
+947f33d feat: research command (polling, markdown...)     (Phase 3)
+08aa2bb feat(core): client wrapper, config loader...      (Phase 2)
+288feba chore: scaffold project structure                 (Phase 1)
+```
+
+### Shipped surface
+- `gdr research <query> [--max] [--plan] [--stream/--no-stream]
+  [--output DIR] [--dry-run] [--api-key KEY] [--no-confirm]
+  [--config PATH] [--tool NAME]... [--mcp NAME=URL]...
+  [--mcp-header NAME=Key:Value]... [--file PATH]... [--url URL]...
+  [--file-search-store NAME]... [--visualization auto|off]
+  [--untrusted-input]`
+- `gdr plan refine <id> <feedback>` — one-shot refinement
+- `gdr plan approve <id> [--query LABEL] [--stream/--no-stream]
+  [--output DIR] [--dry-run] [--api-key] [--config]`
+- `gdr --version` / `gdr -V`
+
+### Module map (src/gdr/)
+- `cli.py` — Typer app root; registers `research` + `plan` sub-app
+- `commands/research.py` — `run()` Typer entry + `execute_research()`
+  shared helper. **This is THE execution pipeline.**
+- `commands/plan.py` — `refine_cmd`, `approve_cmd`; both delegate core
+  logic to shared modules.
+- `core/client.py` — `GdrClient` SDK façade (lazy genai import, key
+  fingerprint, SDK version check for interactions API).
+- `core/models.py` — Frozen Pydantic: `RunContext`, `AgentConfig`,
+  `TextPart`/`MediaPart` (discriminated `InputPart`), `McpSpec`,
+  `FileSearchSpec`, `Record`.
+- `core/inputs.py` — **CLI flag → domain object parsers.** `parse_file`,
+  `parse_mcps`, `parse_file_search_stores`, `urls_as_text_part`,
+  `ensure_url_context_tool`, `validate_tool_names`,
+  `validate_visualization`. All raise `ConfigError` on bad input.
+- `config.py` — TOML loader with env expansion, Pydantic-validated.
+- `core/requests.py` — `build_create_kwargs(ctx, policy) → (kwargs,
+  stripped)`. Single choke point for RunContext → SDK dict.
+- `core/rendering.py` — `write_artifacts()` emits `report.md`,
+  `sources.json`, `metadata.json`, `transcript.json` (redacted),
+  plus `images/image_NNN<.ext>` when outputs contain image payloads.
+  `extract_images()` + `write_images()` are public helpers.
+- `core/persistence.py` — `Store` protocol + `JsonlStore` (append-only
+  JSONL, in-memory index, `Store.recent()` for chronological query,
+  `Store.list_children()` for parent-id tree).
+- `core/security.py` — `SecurityPolicy` with MCP header validation,
+  path confinement, redaction, untrusted-input tool filtering.
+- `core/streaming.py` — `StreamAggregator` + `StreamEvent` for SSE
+  consumption.
+- `core/planning.py` — `PlanRequest`, `PlanDecision`,
+  `interactive_plan_loop()`.
+- `ui/progress.py` — `poll_until_complete()` + `run_with_live_status()`.
+- `ui/live.py` — `LiveRenderer` + `stream_with_live_ui()`.
+- `constants.py`, `errors.py` — shared constants and typed exceptions
+  mapped to exit codes (0/1/2/3/4/5/130).
+
+### Test coverage (93% overall, 280 tests)
+- `test_cli.py` (4) — `--version`, `-V`, `--help`, no-args.
+- `test_client.py` (8) — GdrClient construction + fingerprint.
+- `test_config.py` (20) — TOML parsing, env expansion, defaults.
+- `test_inputs.py` (41) — **Phase 6 flag parsing.** --file/--url/--mcp/
+  --mcp-header/--file-search-store/--visualization/--tool.
+- `test_live.py` (12) — `LiveRenderer` + `stream_with_live_ui`.
+- `test_models.py` (16) — Pydantic validation and frozen-ness.
+- `test_persistence.py` (16) — JsonlStore CRUD + paths.
+- `test_planning.py` (20) — helpers + `interactive_plan_loop`.
+- `test_plan_command.py` (9) — `gdr plan refine|approve`.
+- `test_progress.py` (11) — `poll_until_complete` with fake clock/sleep.
+- `test_rendering.py` (26) — report/sources/metadata/transcript, plus
+  **Phase 6** image extraction + write_images + report ordering.
+- `test_requests.py` (19) — kwargs assembly, MCP validation, plus
+  **Phase 6** combined tools + multimodal cases.
+- `test_research_command.py` (27) — dry-run, happy path, max confirm,
+  output override, streaming, disconnect, --plan approve/refine/cancel,
+  plus **Phase 6** CLI-level flows: --tool/--mcp/--mcp-header/--file/
+  --url/--file-search-store/--visualization/--untrusted-input.
+- `test_security.py` (32) — header validation, slug, path, redaction.
+- `test_streaming.py` (19) — golden fixtures for all 5 event scenarios.
+
+### Gate commands
+```
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+uv run pytest -q
+uv run pytest --cov=src/gdr --cov-report=term-missing
+```
+
+### Smoke checks (run without API key)
+```
+uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx
+uv run gdr research "smoke" --plan --dry-run --api-key AIza-xxxx-xxxx
+uv run gdr plan approve "plan-id-123" --dry-run
+uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
+    --tool google_search --mcp deploys=https://mcp.example.com \
+    --mcp-header 'deploys=Authorization:Bearer xyz' \
+    --file-search-store kb-2025 --visualization off
+```
+
+---
+
+## Phase 7 (NEXT)
+
+**Scope per plan:**
+
+> History commands — `ls`, `show`, `status`, `resume`, `follow-up`,
+> `cancel`. Commit: `feat: history, resume, follow-up, cancel`.
+
+### Implementation checklist
+
+1. **`gdr ls [--limit N] [--status S] [--since DATE]`** — reads
+   `JsonlStore` via `Store.recent()` and pretty-prints a table (Rich).
+   Columns: id, created_at, status, agent, query truncated, tokens.
+   Needs a new `commands/ls.py` Typer entry.
+
+2. **`gdr show <id> [--part text|thoughts|sources|images]`** — look up
+   the record in `JsonlStore` to find `output_dir`, then print the
+   artifact. `--part text` (default) prints `report.md`; `--part
+   sources` → `sources.json` contents; `--part images` → list image
+   files. Needs a new `commands/show.py`.
+
+3. **`gdr status <id>`** — calls `client.interactions.get(id=...)` and
+   prints current status + elapsed time + last thought (if still
+   streaming). Useful for detached runs where we lost the stream but
+   want a quick check. Needs a new `commands/status.py`.
+
+4. **`gdr resume <id>`** — re-attach to a running interaction. If
+   still streaming, open a new stream (or just poll — the SDK may or
+   may not support resume via `last_event_id`; fall back to polling and
+   document that partial stream history from the pre-disconnect period
+   is lost). If terminal, skip to render. Reuses `execute_research`
+   machinery but with only the post-create tail (`_finalize_and_render`
+   equivalent). Probably needs a small refactor to expose that tail as
+   a public helper.
+
+5. **`gdr follow-up <id> <question>`** — create a new interaction with
+   `previous_interaction_id=<id>` and the new question as input. Runs
+   the full research pipeline. Reuses `execute_research` with a
+   `previous_interaction_id` — most of the machinery is already there
+   from the `--plan` flow.
+
+6. **`gdr cancel <id>`** — call `client.interactions.cancel(id=...)` if
+   that's a public method, else raise and document why. If the SDK
+   doesn't support cancel, v1 may need to remove this command.
+
+7. **Tests** — roughly +30-40 covering:
+   - `test_ls_command.py` — filter by status/since/limit.
+   - `test_show_command.py` — each --part value.
+   - `test_status_command.py` — terminal vs in-progress.
+   - `test_resume_command.py` — happy + re-polling cases.
+   - `test_follow_up_command.py` — create with previous_interaction_id.
+   - `test_cancel_command.py` — if supported.
+
+### Gotchas to watch for in Phase 7
+- `JsonlStore.recent()` is chronological (most recent first). `ls
+  --since DATE` should parse human dates (`yesterday`, `2026-04-01`,
+  etc.) via a small helper — don't just accept ISO.
+- `show <id>` needs the `output_dir` from the record. If the record
+  predates Phase 6 images it won't have an `images/` subdir — code
+  defensively, don't crash when missing.
+- `resume` after a terminal status should skip straight to
+  `write_artifacts` — but the run's `output_dir` in the record may
+  already have files from the original run. Decide: overwrite or
+  error? Probably error with a helpful message + `--force` flag.
+- Record schema is frozen (Pydantic). If Phase 7 needs a new field
+  (e.g. `last_followup_id`), bump schema and handle old records via
+  optional fields.
+- `follow-up` should handle the Max-confirmation gate the same way
+  `--max` does — if the original run used Max and the follow-up
+  doesn't specify otherwise, inherit. But flag overrides win.
+
+---
+
+## Progress Log
+
+### 2026-04-22 — Phases 1-5 complete (prior session)
+- Shipped scaffold, core foundations, research MVP (polling), streaming
+  with live UI, collaborative planning flow.
+- 212 tests, 92% coverage, ruff/mypy strict clean.
+- **Learnings for future iterations:**
+  - All key patterns captured in "Codebase Patterns" section above -
+    read that BEFORE editing.
+  - The `execute_research()` shared helper is the single execution
+    pipeline. Resist duplicating it.
+  - Golden-file fixtures under `tests/fixtures/streams/` are the
+    regression signal for the SDK event shape.
+  - `_get` attribute-then-key helper is the core interop trick for
+    tests <-> SDK objects.
+
+### 2026-04-22 — Phase 6 complete (tools, MCP, multimodal, visualization)
+- Shipped `--tool`, `--mcp`, `--mcp-header`, `--file`, `--url`,
+  `--file-search-store`, `--visualization`, `--untrusted-input` flags.
+- Added image rendering: base64 outputs decoded to
+  `<run>/images/image_NNN<.ext>` and linked in `report.md` under a
+  `## Images` section positioned between body and sources.
+- New module `src/gdr/core/inputs.py` (214 lines) — all CLI flag
+  parsers live here; every parser raises `ConfigError` so the CLI's
+  existing exit-code-4 path covers everything uniformly.
+- 280 tests pass (+68 from Phase 5), 93% coverage, ruff/mypy clean.
+- Files changed:
+  - `src/gdr/core/inputs.py` (new) — flag parsers
+  - `src/gdr/commands/research.py` — wired flags, added
+    `_parse_flag_inputs` helper, extended `_build_run_context` and
+    `execute_research` signatures
+  - `src/gdr/core/rendering.py` — image extraction + writing + report
+    links
+  - `tests/unit/test_inputs.py` (new, 41 tests)
+  - `tests/unit/test_rendering.py` — image round-trip tests (+11)
+  - `tests/unit/test_requests.py` — combined-tools/multimodal cases
+    (+6)
+  - `tests/unit/test_research_command.py` — 9 new CLI-level classes
+    (+9 tests): TestToolFlag, TestMcpFlag, TestFileFlag, TestUrlFlag,
+    TestFileSearchStoreFlag, TestVisualizationFlag, TestUntrustedInputFlag
+- **Learnings for future iterations:**
+  - Typer's `list[str] = typer.Option([], ...)` cleanly handles
+    repeatable flags. No custom callback needed. Default `[]` is safe
+    with `extend-immutable-calls = ["typer.Option"]` already set.
+  - When extending a function (`execute_research`) with many new
+    kwargs, prefer a few derived-domain kwargs (tuple of McpSpec, etc.)
+    over a bag of primitive flags. Keeps the boundary between parsing
+    and orchestration clean.
+  - `mimetypes.guess_extension("image/jpeg")` returns `.jpe` on macOS.
+    Tests should check the prefix, not the exact extension.
+  - For MCP header injection tests, an `\r\n` inside the value is
+    caught at `build_tools()` time via `policy.validate_mcp_headers`;
+    the parsing layer doesn't need duplicate logic.
+  - Auto-untrusted mode (triggered by `--file`/`--url` +
+    `safe_untrusted=True`) needs a manual test because most test
+    configs don't attach files. Write a dedicated test that exercises
+    the auto-trigger path; don't rely on the explicit `--untrusted-input`
+    test to cover both.
+  - Ruff may reformat newly written modules on `ruff format` — run
+    format AFTER writing, then run lint/mypy/test in that order so
+    you catch format-induced noise before the final pass.
+---

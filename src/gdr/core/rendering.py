@@ -3,13 +3,16 @@
 Artifact layout written by ``render_artifacts``::
 
     <output_dir>/
-    ├── report.md       # Final synthesized text + Sources section
+    ├── report.md       # Final synthesized text + Images + Sources
     ├── sources.json    # Deduplicated citation list
     ├── metadata.json   # Interaction id, timings, tools, usage
-    └── transcript.json # Raw outputs with MCP/auth redaction applied
+    ├── transcript.json # Raw outputs with MCP/auth redaction applied
+    └── images/
+        ├── image_001.png
+        └── image_002.jpg
 
-Image handling (writing base64 PNGs to ``images/``) is deferred to Phase 6
-together with the ``--visualization`` flag.
+Image outputs are base64-decoded and written under ``images/`` with a
+predictable name. The final report links them as Markdown image refs.
 
 The module is tolerant of two output shapes:
 
@@ -24,7 +27,10 @@ without a separate adapter layer.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import mimetypes
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +40,10 @@ from gdr.core.models import RunContext
 from gdr.core.security import SecurityPolicy
 
 _UTC = timezone.utc
+
+# Fallback extension when the MIME type is missing or unknown — matches the
+# default the Files API uses.
+_DEFAULT_IMAGE_EXT = ".png"
 
 # ---------------------------------------------------------------------------
 # Output / attribute helpers
@@ -177,15 +187,19 @@ def render_report_markdown(
     query: str,
     agent: str,
     sources: Iterable[dict[str, Any]] | None = None,
+    image_filenames: Iterable[str] | None = None,
 ) -> str:
     """Assemble the final ``report.md`` body.
 
-    Structure: H1 (the query), italic context line, the report body, and an
-    optional ``## Sources`` section. Passing an explicit ``sources`` iterable
-    keeps the rendering deterministic when callers have already collected
-    them (the tests, notably); otherwise we recollect from the interaction.
+    Structure: H1 (the query), italic context line, the report body, an
+    optional ``## Images`` section (when ``image_filenames`` are given),
+    and an optional ``## Sources`` section. Passing explicit ``sources``
+    or ``image_filenames`` keeps the rendering deterministic when callers
+    have already collected them (the tests, notably); otherwise we
+    recollect from the interaction.
     """
     source_list = list(sources) if sources is not None else collect_sources(interaction)
+    image_list = list(image_filenames) if image_filenames is not None else []
     body = build_report_text(interaction) or "*(No final report text was returned.)*"
 
     ts = datetime.now(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -196,11 +210,76 @@ def render_report_markdown(
         "",
         body,
     ]
+    if image_list:
+        lines += ["", "---", "", "## Images", ""]
+        for idx, name in enumerate(image_list, start=1):
+            lines.append(f"![Image {idx}](images/{name})")
     if source_list:
         lines += ["", "---", "", "## Sources", ""]
         for idx, src in enumerate(source_list, start=1):
             lines.append(_render_source_line(idx, src))
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Image outputs
+# ---------------------------------------------------------------------------
+
+
+def _image_extension(mime: str | None) -> str:
+    """Pick a filesystem extension for a given image MIME type.
+
+    Falls back to ``.png`` when MIME is missing — most Deep Research
+    visualization payloads are PNGs and matching the wire default is the
+    least surprising behavior.
+    """
+    if not mime:
+        return _DEFAULT_IMAGE_EXT
+    guessed = mimetypes.guess_extension(mime)
+    return guessed or _DEFAULT_IMAGE_EXT
+
+
+def extract_images(interaction: Any) -> list[tuple[bytes, str]]:
+    """Return a list of ``(decoded_bytes, mime_type)`` for image outputs.
+
+    Skips outputs whose ``data`` field is missing or can't be decoded —
+    garbage on the wire shouldn't abort the whole render, it just gets
+    silently dropped. (The raw transcript still captures the original
+    payload for debugging.)
+    """
+    collected: list[tuple[bytes, str]] = []
+    for output in _outputs_of(interaction):
+        if _get(output, "type") != "image":
+            continue
+        raw_data = _get(output, "data")
+        if not raw_data:
+            continue
+        try:
+            decoded = base64.b64decode(str(raw_data), validate=True)
+        except (ValueError, binascii.Error):
+            continue
+        mime = _get(output, "mime_type") or "image/png"
+        collected.append((decoded, str(mime)))
+    return collected
+
+
+def write_images(output_dir: Path, images: list[tuple[bytes, str]]) -> list[Path]:
+    """Write ``images`` under ``<output_dir>/images/`` and return their paths.
+
+    Filenames are ``image_NNN<.ext>`` with NNN zero-padded to 3 digits —
+    avoids sorting surprises in shells that do lexical sort.
+    """
+    if not images:
+        return []
+    images_dir = output_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for index, (data, mime) in enumerate(images, start=1):
+        ext = _image_extension(mime)
+        path = images_dir / f"image_{index:03d}{ext}"
+        path.write_bytes(data)
+        written.append(path)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +385,14 @@ def write_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     sources = collect_sources(interaction)
-    report = render_report_markdown(interaction, query=ctx.query, agent=ctx.agent, sources=sources)
+    image_paths = write_images(output_dir, extract_images(interaction))
+    report = render_report_markdown(
+        interaction,
+        query=ctx.query,
+        agent=ctx.agent,
+        sources=sources,
+        image_filenames=[p.name for p in image_paths],
+    )
     metadata = build_metadata(
         interaction,
         ctx=ctx,

@@ -7,6 +7,7 @@ These exercise the full command path with the google-genai SDK mocked at the
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,12 @@ import pytest
 from typer.testing import CliRunner
 
 from gdr.cli import app
+
+# 1x1 transparent PNG, for --file round-trip tests.
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+_TINY_PNG_BYTES = base64.b64decode(_TINY_PNG_B64)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -643,3 +650,385 @@ class TestPlanFlag:
             or '"collaborative_planning":true' in result.output.lower()
             or "collaborative_planning" in result.output
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: --tool / --mcp / --mcp-header / --file / --url / --file-search-store /
+# --visualization / --untrusted-input
+# ---------------------------------------------------------------------------
+
+
+class TestToolFlag:
+    def test_tool_flag_overrides_defaults(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intttool01", status="in_progress"),
+            got=_fake_completed(id_="intttool01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--tool",
+                "google_search",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        tool_types = [t["type"] for t in call_kwargs["tools"]]
+        # Only google_search — defaults (url_context, code_execution) are dropped.
+        assert tool_types == ["google_search"]
+
+    def test_configured_tool_name_rejected_with_hint(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        mocker.patch("google.genai.Client")
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--tool",
+                "file_search",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 4
+        assert "--file-search-store" in result.output
+
+
+class TestMcpFlag:
+    def test_mcp_adds_server_tool_with_header(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intmcp01", status="in_progress"),
+            got=_fake_completed(id_="intmcp01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--mcp",
+                "deploys=https://mcp.example.com",
+                "--mcp-header",
+                "deploys=Authorization:Bearer test-token",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        mcp_tool = next(t for t in call_kwargs["tools"] if t["type"] == "mcp_server")
+        assert mcp_tool["name"] == "deploys"
+        assert mcp_tool["url"] == "https://mcp.example.com"
+        assert mcp_tool["headers"] == {"Authorization": "Bearer test-token"}
+
+    def test_mcp_header_injection_rejected(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        mock_client_ctor = mocker.patch("google.genai.Client")
+        # CR/LF in header value = injection attempt → ConfigError → exit 4.
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--mcp",
+                "bad=https://mcp.example.com",
+                "--mcp-header",
+                "bad=X-Custom:line1\r\nX-Evil: yes",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 4
+        # Client should never have been built (and certainly never called).
+        mock_client_ctor.assert_not_called()
+
+    def test_mcp_header_for_unknown_server_rejected(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        mocker.patch("google.genai.Client")
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--mcp",
+                "known=https://k.example.com",
+                "--mcp-header",
+                "typo=Authorization:Bearer abc",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 4
+        assert "unknown MCP server" in result.output or "typo" in result.output
+
+
+class TestFileFlag:
+    def test_file_attached_as_media_part(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        png = tmp_path / "tiny.png"
+        png.write_bytes(_TINY_PNG_BYTES)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfile01", status="in_progress"),
+            got=_fake_completed(id_="intfile01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Describe this image",
+                "--file",
+                str(png),
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        assert isinstance(call_kwargs["input"], list)
+        text_part = call_kwargs["input"][0]
+        image_part = call_kwargs["input"][1]
+        assert text_part == {"type": "text", "text": "Describe this image"}
+        assert image_part["type"] == "image"
+        assert image_part["mime_type"] == "image/png"
+        assert image_part["data"] == _TINY_PNG_B64
+
+    def test_missing_file_exits_four(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        mocker.patch("google.genai.Client")
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--file",
+                str(tmp_path / "nope.pdf"),
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 4
+        assert "does not exist" in result.output or "nope.pdf" in result.output
+
+
+class TestUrlFlag:
+    def test_url_adds_url_context_tool_when_tools_overridden(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="inturl01", status="in_progress"),
+            got=_fake_completed(id_="inturl01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--tool",
+                "google_search",  # deliberately excludes url_context
+                "--url",
+                "https://a.example/page",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        tool_types = [t["type"] for t in call_kwargs["tools"]]
+        # url_context auto-added even though user didn't pass it.
+        assert "url_context" in tool_types
+        # URLs appended as a TextPart after the main query.
+        assert isinstance(call_kwargs["input"], list)
+        url_text_parts = [p for p in call_kwargs["input"] if p.get("type") == "text"]
+        assert any("https://a.example/page" in p["text"] for p in url_text_parts)
+
+
+class TestFileSearchStoreFlag:
+    def test_bare_store_name_prefixed(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfs01", status="in_progress"),
+            got=_fake_completed(id_="intfs01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--file-search-store",
+                "kb-2025",  # bare name
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        fs_tool = next(t for t in call_kwargs["tools"] if t["type"] == "file_search")
+        assert fs_tool["file_search_store_names"] == ["fileSearchStores/kb-2025"]
+
+
+class TestVisualizationFlag:
+    def test_off_flips_agent_config(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intvis01", status="in_progress"),
+            got=_fake_completed(id_="intvis01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--visualization",
+                "off",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        assert call_kwargs["agent_config"]["visualization"] == "off"
+
+    def test_invalid_value_rejected(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        mocker.patch("google.genai.Client")
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--visualization",
+                "maybe",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 4
+
+
+class TestUntrustedInputFlag:
+    def test_strips_code_execution_and_mcp(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intuntr01", status="in_progress"),
+            got=_fake_completed(id_="intuntr01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Q",
+                "--tool",
+                "google_search",
+                "--tool",
+                "code_execution",
+                "--mcp",
+                "svc=https://svc.example.com",
+                "--untrusted-input",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        tool_types = [t["type"] for t in call_kwargs["tools"]]
+        assert "code_execution" not in tool_types
+        assert "mcp_server" not in tool_types
+        assert "google_search" in tool_types
+        # The CLI should have surfaced the stripped warning to the user.
+        assert "stripped tools" in result.output.lower()
+
+    def test_auto_untrusted_triggered_by_file_flag(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        """By default (safe_untrusted=true), attaching --file should flip
+        the policy into untrusted mode even without --untrusted-input."""
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        png = tmp_path / "pic.png"
+        png.write_bytes(_TINY_PNG_BYTES)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intauto01", status="in_progress"),
+            got=_fake_completed(id_="intauto01"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Describe",
+                "--file",
+                str(png),
+                "--tool",
+                "google_search",
+                "--tool",
+                "code_execution",  # should get stripped
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake.create.call_args.kwargs
+        tool_types = [t["type"] for t in call_kwargs["tools"]]
+        assert "code_execution" not in tool_types

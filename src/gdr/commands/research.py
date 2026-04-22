@@ -22,7 +22,23 @@ from rich.panel import Panel
 from gdr.config import Config, load_config
 from gdr.constants import AGENT_FAST, AGENT_MAX, TERMINAL_STATUSES
 from gdr.core.client import GdrClient
-from gdr.core.models import AgentConfig, Record, RunContext
+from gdr.core.inputs import (
+    ensure_url_context_tool,
+    parse_file_search_stores,
+    parse_files,
+    parse_mcps,
+    urls_as_text_part,
+    validate_tool_names,
+    validate_visualization,
+)
+from gdr.core.models import (
+    AgentConfig,
+    FileSearchSpec,
+    InputPart,
+    McpSpec,
+    Record,
+    RunContext,
+)
 from gdr.core.persistence import JsonlStore, Store
 from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
@@ -93,22 +109,34 @@ def _build_run_context(
     output_dir: Path,
     stream: bool,
     previous_interaction_id: str | None = None,
+    builtin_tools: tuple[str, ...] | None = None,
+    mcp_servers: tuple[McpSpec, ...] = (),
+    file_search: FileSearchSpec | None = None,
+    input_parts: tuple[InputPart, ...] = (),
+    visualization: str | None = None,
+    untrusted_input: bool = False,
 ) -> RunContext:
+    tools = config.default_tools if builtin_tools is None else builtin_tools
+    effective_visualization = visualization if visualization is not None else config.visualization
     return RunContext(
         query=query,
         agent=_resolve_agent(config, use_max=use_max),
-        builtin_tools=config.default_tools,
+        builtin_tools=tools,
+        mcp_servers=mcp_servers,
+        file_search=file_search,
+        input_parts=input_parts,
         output_dir=output_dir,
         stream=stream,
         background=True,
         agent_config=AgentConfig(
             thinking_summaries=config.thinking_summaries,  # type: ignore[arg-type]
-            visualization=config.visualization,  # type: ignore[arg-type]
+            visualization=effective_visualization,  # type: ignore[arg-type]
             collaborative_planning=False,
         ),
         previous_interaction_id=previous_interaction_id,
         confirm_max=config.confirm_max,
         auto_open=config.auto_open,
+        untrusted_input=untrusted_input,
     )
 
 
@@ -116,6 +144,51 @@ def _default_stream_preference() -> bool:
     """Default ``--stream`` value: on when stdout is an interactive TTY."""
     isatty = getattr(sys.stdout, "isatty", None)
     return bool(isatty()) if callable(isatty) else False
+
+
+def _parse_flag_inputs(
+    *,
+    tool_names: list[str],
+    mcp_tokens: list[str],
+    mcp_header_tokens: list[str],
+    files: list[Path],
+    urls: list[str],
+    file_search_stores: list[str],
+    visualization: str | None,
+) -> tuple[
+    tuple[str, ...] | None,
+    tuple[McpSpec, ...],
+    FileSearchSpec | None,
+    tuple[InputPart, ...],
+    str | None,
+]:
+    """Turn raw CLI flag values into typed domain objects.
+
+    Returns ``(tools_override, mcp_specs, file_search, input_parts,
+    visualization)``. ``tools_override`` is ``None`` when no ``--tool``
+    flags were passed, meaning "use config defaults"; any other value
+    means "replace with this list".
+    """
+    tools_override: tuple[str, ...] | None = validate_tool_names(tool_names) if tool_names else None
+    mcp_specs = parse_mcps(mcp_tokens, mcp_header_tokens)
+    file_search = parse_file_search_stores(file_search_stores)
+
+    # Assemble supplementary input parts: files first, then a URL-block
+    # text part at the end so the agent reads URLs as explicit context.
+    parts: list[InputPart] = list(parse_files(files))
+    url_part = urls_as_text_part(urls)
+    if url_part is not None:
+        parts.append(url_part)
+
+    # When --url is passed, make sure url_context is in the tool list so
+    # the agent can actually follow them. Only touch the list when tools
+    # were explicitly set; otherwise the config default (which already
+    # includes url_context) covers it.
+    if tools_override is not None:
+        tools_override = ensure_url_context_tool(tools_override, has_urls=bool(urls))
+
+    vis_literal = validate_visualization(visualization)
+    return tools_override, mcp_specs, file_search, tuple(parts), vis_literal
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +217,55 @@ def run(
         "-o",
         help="Exact output directory (overrides the default <ts>_<slug>_<id> layout).",
     ),
+    tools: list[str] = typer.Option(
+        [],
+        "--tool",
+        help=(
+            "Enable a simple builtin tool (google_search, url_context, code_execution). "
+            "Repeatable; overrides config defaults when specified."
+        ),
+    ),
+    mcps: list[str] = typer.Option(
+        [],
+        "--mcp",
+        help=("Attach an MCP server as NAME=URL. Repeatable. Use --mcp-header to add auth."),
+    ),
+    mcp_headers: list[str] = typer.Option(
+        [],
+        "--mcp-header",
+        help="Attach a header to an MCP server as NAME=Key:Value. Repeatable.",
+    ),
+    files: list[Path] = typer.Option(
+        [],
+        "--file",
+        help="Attach a local file (PDF, image, audio, video, etc.) as input. Repeatable.",
+    ),
+    urls: list[str] = typer.Option(
+        [],
+        "--url",
+        help="Attach a URL for the agent to ground on. Enables url_context. Repeatable.",
+    ),
+    file_search_stores: list[str] = typer.Option(
+        [],
+        "--file-search-store",
+        help=(
+            "Enable File Search on a named store. Accepts bare names or "
+            "'fileSearchStores/<name>'. Repeatable."
+        ),
+    ),
+    visualization: str | None = typer.Option(
+        None,
+        "--visualization",
+        help="Control chart/infographic generation: 'auto' or 'off'.",
+    ),
+    untrusted_input: bool = typer.Option(
+        False,
+        "--untrusted-input",
+        help=(
+            "Treat inputs (files/URLs) as untrusted. Strips code_execution and "
+            "mcp_server tools to reduce prompt-injection blast radius."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the request body as JSON and exit without calling the API."
     ),
@@ -161,6 +283,27 @@ def run(
     console = Console()
     config = load_config(path=config_path)
     use_stream = _default_stream_preference() if stream is None else stream
+
+    # Parse CLI inputs into domain objects up front. Any parse error is a
+    # ConfigError → exit code 4 so the user sees a friendly message.
+    try:
+        tools_override, mcp_specs, file_search_spec, extra_parts, vis_literal = _parse_flag_inputs(
+            tool_names=tools,
+            mcp_tokens=mcps,
+            mcp_header_tokens=mcp_headers,
+            files=files,
+            urls=urls,
+            file_search_stores=file_search_stores,
+            visualization=visualization,
+        )
+    except ConfigError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    # --untrusted-input OR (files/urls + safe_untrusted = true) triggers tool
+    # stripping. The SecurityPolicy owns the actual filtering.
+    auto_untrusted = bool((files or urls) and config.safe_untrusted)
+    effective_untrusted = untrusted_input or auto_untrusted
 
     # --plan kicks off the interactive planning loop before we hit the
     # execution path. The user's query becomes the seed input for the
@@ -196,6 +339,12 @@ def run(
         previous_interaction_id=previous_interaction_id,
         api_input=approve_input,
         plan_mode_for_dry_run=use_plan,
+        builtin_tools=tools_override,
+        mcp_servers=mcp_specs,
+        file_search=file_search_spec,
+        input_parts=extra_parts,
+        visualization=vis_literal,
+        untrusted_input=effective_untrusted,
     )
 
 
@@ -218,6 +367,12 @@ def execute_research(
     previous_interaction_id: str | None = None,
     api_input: str | None = None,
     plan_mode_for_dry_run: bool = False,
+    builtin_tools: tuple[str, ...] | None = None,
+    mcp_servers: tuple[McpSpec, ...] = (),
+    file_search: FileSearchSpec | None = None,
+    input_parts: tuple[InputPart, ...] = (),
+    visualization: str | None = None,
+    untrusted_input: bool = False,
 ) -> None:
     """Run the full submit → stream/poll → render pipeline.
 
@@ -235,7 +390,7 @@ def execute_research(
     policy = SecurityPolicy(
         output_root=config.output_dir,
         safe_untrusted=config.safe_untrusted,
-        untrusted=False,
+        untrusted=untrusted_input,
     )
 
     # For --dry-run we don't need network or API key. The synthetic
@@ -250,6 +405,12 @@ def execute_research(
             output_dir=dry_output,
             stream=use_stream,
             previous_interaction_id=previous_interaction_id,
+            builtin_tools=builtin_tools,
+            mcp_servers=mcp_servers,
+            file_search=file_search,
+            input_parts=input_parts,
+            visualization=visualization,
+            untrusted_input=untrusted_input,
         )
         kwargs, stripped = _build_request_kwargs(
             ctx_for_kwargs,

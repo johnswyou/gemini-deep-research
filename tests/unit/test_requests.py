@@ -151,3 +151,58 @@ class TestBuildCreateKwargs:
         ctx = _ctx(builtin_tools=("google_search", "code_execution"))
         _, stripped = build_create_kwargs(ctx, _policy(tmp_path, untrusted=True))
         assert stripped == ["code_execution"]
+
+
+class TestCombinedToolsAndMultimodal:
+    """Phase 6 — file_search + MCP + media parts together."""
+
+    def test_builtin_plus_file_search_plus_mcp_preserves_order(self, tmp_path: Path) -> None:
+        mcp = McpSpec(name="svc", url="https://svc.example.com", headers={})
+        ctx = _ctx(
+            builtin_tools=("google_search", "url_context"),
+            file_search=FileSearchSpec(file_search_store_names=("fileSearchStores/kb",)),
+            mcp_servers=(mcp,),
+        )
+        tools, _ = build_tools(ctx, _policy(tmp_path))
+        types = [t["type"] for t in tools]
+        # Contract: builtin → file_search → mcp_server, in that order.
+        assert types == ["google_search", "url_context", "file_search", "mcp_server"]
+
+    def test_media_part_and_text_query_become_parts_list(self, tmp_path: Path) -> None:
+        png = MediaPart(type="image", data="aGk=", mime_type="image/png")
+        pdf = MediaPart(type="document", data="aGk=", mime_type="application/pdf")
+        ctx = _ctx(input_parts=(png, pdf), query="Summarize.")
+        kwargs, _ = build_create_kwargs(ctx, _policy(tmp_path))
+        assert isinstance(kwargs["input"], list)
+        assert kwargs["input"][0] == {"type": "text", "text": "Summarize."}
+        assert kwargs["input"][1]["type"] == "image"
+        assert kwargs["input"][1]["data"] == "aGk="
+        assert kwargs["input"][1]["mime_type"] == "image/png"
+        assert kwargs["input"][2]["type"] == "document"
+
+    def test_untrusted_strips_mcp_but_keeps_file_search(self, tmp_path: Path) -> None:
+        """file_search is safe under untrusted mode — only code_execution and
+        mcp_server are stripped."""
+        mcp = McpSpec(name="svc", url="https://svc.example.com")
+        ctx = _ctx(
+            builtin_tools=("google_search", "code_execution"),
+            file_search=FileSearchSpec(file_search_store_names=("fileSearchStores/kb",)),
+            mcp_servers=(mcp,),
+        )
+        tools, stripped = build_create_kwargs(ctx, _policy(tmp_path, untrusted=True))
+        types = [t["type"] for t in tools["tools"]]
+        assert "code_execution" not in types
+        assert "mcp_server" not in types
+        assert "file_search" in types
+        assert sorted(stripped) == ["code_execution", "mcp_server"]
+
+    def test_mcp_with_valid_authorization_header_kept(self, tmp_path: Path) -> None:
+        mcp = McpSpec(
+            name="deploys",
+            url="https://mcp.example.com",
+            headers={"Authorization": "Bearer safe-token"},
+        )
+        ctx = _ctx(mcp_servers=(mcp,))
+        tools, _ = build_tools(ctx, _policy(tmp_path))
+        # Headers survive unmodified through requests (redaction is transcript-only).
+        assert tools[-1]["headers"] == {"Authorization": "Bearer safe-token"}

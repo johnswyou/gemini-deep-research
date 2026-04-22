@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,13 +18,22 @@ from gdr.core.rendering import (
     build_report_text,
     build_transcript,
     collect_sources,
+    extract_images,
     render_report_markdown,
     write_artifacts,
+    write_images,
 )
 from gdr.core.security import SecurityPolicy
 from gdr.errors import ConfigError
 
 _UTC = timezone.utc
+
+# A valid 1x1 transparent PNG, base64. Small enough to inline, real enough
+# for filesystem round-trip tests.
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+_TINY_PNG_BYTES = base64.b64decode(_TINY_PNG_B64)
 
 
 # ---------------------------------------------------------------------------
@@ -292,3 +302,114 @@ class TestWriteArtifacts:
                 started_at=datetime(2026, 4, 22, tzinfo=_UTC),
                 finished_at=datetime(2026, 4, 22, tzinfo=_UTC),
             )
+
+
+# ---------------------------------------------------------------------------
+# Image extraction + writing
+# ---------------------------------------------------------------------------
+
+
+def _image_output(data_b64: str, mime: str = "image/png") -> SimpleNamespace:
+    return SimpleNamespace(type="image", data=data_b64, mime_type=mime)
+
+
+class TestExtractImages:
+    def test_returns_decoded_bytes_and_mime(self) -> None:
+        interaction = _fake_interaction(outputs=[_image_output(_TINY_PNG_B64)])
+        images = extract_images(interaction)
+        assert len(images) == 1
+        data, mime = images[0]
+        assert data == _TINY_PNG_BYTES
+        assert mime == "image/png"
+
+    def test_ignores_non_image_outputs(self) -> None:
+        interaction = _fake_interaction(
+            outputs=[_text_output("body"), _image_output(_TINY_PNG_B64)]
+        )
+        assert len(extract_images(interaction)) == 1
+
+    def test_skips_entries_without_data(self) -> None:
+        interaction = _fake_interaction(
+            outputs=[SimpleNamespace(type="image", data=None, mime_type="image/png")]
+        )
+        assert extract_images(interaction) == []
+
+    def test_skips_unparseable_base64(self) -> None:
+        interaction = _fake_interaction(
+            outputs=[_image_output("not@@valid$$base64!!", mime="image/png")]
+        )
+        assert extract_images(interaction) == []
+
+    def test_defaults_missing_mime_to_png(self) -> None:
+        interaction = _fake_interaction(
+            outputs=[SimpleNamespace(type="image", data=_TINY_PNG_B64, mime_type=None)]
+        )
+        images = extract_images(interaction)
+        assert images[0][1] == "image/png"
+
+
+class TestWriteImages:
+    def test_writes_numbered_files_under_images_dir(self, tmp_path: Path) -> None:
+        images = [(_TINY_PNG_BYTES, "image/png"), (_TINY_PNG_BYTES, "image/jpeg")]
+        paths = write_images(tmp_path, images)
+        assert len(paths) == 2
+        assert paths[0].name == "image_001.png"
+        # image/jpeg → .jpe on stdlib mimetypes. Just verify JPEG-adjacent.
+        assert paths[1].name.startswith("image_002.")
+        assert paths[0].parent == tmp_path / "images"
+        # Files round-trip.
+        assert paths[0].read_bytes() == _TINY_PNG_BYTES
+
+    def test_empty_list_does_not_create_dir(self, tmp_path: Path) -> None:
+        paths = write_images(tmp_path, [])
+        assert paths == []
+        assert not (tmp_path / "images").exists()
+
+
+class TestReportWithImages:
+    def test_report_links_images_section(self) -> None:
+        md = render_report_markdown(
+            _fake_interaction(outputs=[_text_output("Body.")]),
+            query="Q",
+            agent=AGENT_FAST,
+            image_filenames=["image_001.png", "image_002.jpg"],
+        )
+        assert "## Images" in md
+        assert "![Image 1](images/image_001.png)" in md
+        assert "![Image 2](images/image_002.jpg)" in md
+
+    def test_no_images_section_when_list_empty(self) -> None:
+        md = render_report_markdown(
+            _fake_interaction(outputs=[_text_output("Body.")]),
+            query="Q",
+            agent=AGENT_FAST,
+            image_filenames=[],
+        )
+        assert "## Images" not in md
+
+
+class TestWriteArtifactsWithImages:
+    def test_images_written_and_linked_from_report(self, tmp_path: Path) -> None:
+        interaction = _fake_interaction(
+            outputs=[
+                _text_output("Body."),
+                _image_output(_TINY_PNG_B64, mime="image/png"),
+            ]
+        )
+        policy = SecurityPolicy(output_root=tmp_path)
+        started = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        finished = datetime(2026, 4, 22, 14, 35, tzinfo=_UTC)
+        output_dir = tmp_path / "run1"
+        paths = write_artifacts(
+            interaction,
+            ctx=_ctx(output_dir),
+            output_dir=output_dir,
+            policy=policy,
+            started_at=started,
+            finished_at=finished,
+        )
+        assert paths["report"].is_file()
+        assert (output_dir / "images" / "image_001.png").is_file()
+        assert (output_dir / "images" / "image_001.png").read_bytes() == _TINY_PNG_BYTES
+        report = paths["report"].read_text(encoding="utf-8")
+        assert "![Image 1](images/image_001.png)" in report
