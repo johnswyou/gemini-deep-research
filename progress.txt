@@ -205,7 +205,7 @@ re-learn them.
 
 ### Commits
 ```
-<Phase 8 commit hash> feat: config and doctor commands            (Phase 8)
+c60b2b0 feat: config and doctor commands            (Phase 8)
 995e5d2 docs: record Phase 7 commit hash in progress log
 15b7d1c feat: history, resume, follow-up, cancel          (Phase 7)
 7268ad5 docs: record Phase 6 commit hash in progress log
