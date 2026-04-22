@@ -205,7 +205,7 @@ re-learn them.
 
 ### Commits
 ```
-<Phase 9 commit hash> docs: usage guide, MCP how-to, examples     (Phase 9)
+a59a600 docs: usage guide, MCP how-to, examples     (Phase 9)
 70010ef docs: record Phase 8 commit hash in progress log
 c60b2b0 feat: config and doctor commands            (Phase 8)
 995e5d2 docs: record Phase 7 commit hash in progress log
