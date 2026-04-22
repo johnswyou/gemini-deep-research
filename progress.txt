@@ -161,7 +161,7 @@ re-learn them.
 
 ### Commits
 ```
-<Phase 6 commit hash> feat: tools, MCP, multimodal inputs, visualization (Phase 6)
+bf81ec5 feat: tools, MCP, multimodal inputs, visualization (Phase 6)
 6ee27e9 feat: collaborative planning flow                (Phase 5)
 d4f128d feat: streaming with live thought summaries...    (Phase 4)
 947f33d feat: research command (polling, markdown...)     (Phase 3)
