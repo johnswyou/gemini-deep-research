@@ -33,14 +33,15 @@ from rich.console import Console
 from rich.panel import Panel
 
 from gdr.config import Config, load_config
-from gdr.constants import AGENT_FAST, AGENT_MAX
+from gdr.constants import AGENT_FAST, AGENT_MAX, TERMINAL_STATUSES
 from gdr.core.client import GdrClient
 from gdr.core.models import AgentConfig, Record, RunContext
 from gdr.core.persistence import JsonlStore, Store
 from gdr.core.rendering import write_artifacts
 from gdr.core.requests import build_create_kwargs
 from gdr.core.security import SecurityPolicy, sanitize_slug
-from gdr.errors import ConfigError, GdrError
+from gdr.errors import ConfigError, GdrError, StreamError
+from gdr.ui.live import stream_with_live_ui
 from gdr.ui.progress import run_with_live_status
 
 _UTC = timezone.utc
@@ -87,7 +88,12 @@ def _allocate_output_dir(
 
 
 def _build_run_context(
-    *, query: str, config: Config, use_max: bool, output_dir: Path
+    *,
+    query: str,
+    config: Config,
+    use_max: bool,
+    output_dir: Path,
+    stream: bool,
 ) -> RunContext:
     agent = AGENT_MAX if use_max else config.default_agent
     if use_max:
@@ -103,7 +109,7 @@ def _build_run_context(
         agent=agent,
         builtin_tools=config.default_tools,
         output_dir=output_dir,
-        stream=False,  # Phase 3: polling only. Phase 4 flips this per --stream.
+        stream=stream,
         background=True,
         agent_config=AgentConfig(
             thinking_summaries=config.thinking_summaries,  # type: ignore[arg-type]
@@ -115,6 +121,12 @@ def _build_run_context(
     )
 
 
+def _default_stream_preference() -> bool:
+    """Default ``--stream`` value: on when stdout is an interactive TTY."""
+    isatty = getattr(sys.stdout, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
+
+
 # ---------------------------------------------------------------------------
 # The command
 # ---------------------------------------------------------------------------
@@ -124,6 +136,11 @@ def run(
     query: str = typer.Argument(..., help="Your research question."),
     use_max: bool = typer.Option(
         False, "--max", help="Use Deep Research Max (higher quality, longer runtime, higher cost)."
+    ),
+    stream: bool | None = typer.Option(
+        None,
+        "--stream/--no-stream",
+        help="Stream live thought summaries and text deltas. Defaults to on when stdout is a TTY.",
     ),
     output: Path | None = typer.Option(
         None,
@@ -147,6 +164,7 @@ def run(
     """Run a Deep Research task and save the report to disk."""
     console = Console()
     config = load_config(path=config_path)
+    use_stream = _default_stream_preference() if stream is None else stream
 
     # For --dry-run we don't need network or API key. Build the kwargs with
     # a synthetic output_dir that passes validation but doesn't need to exist.
@@ -159,7 +177,11 @@ def run(
 
     try:
         ctx_for_dry = _build_run_context(
-            query=query, config=config, use_max=use_max, output_dir=dry_output
+            query=query,
+            config=config,
+            use_max=use_max,
+            output_dir=dry_output,
+            stream=use_stream,
         )
         kwargs, stripped = build_create_kwargs(ctx_for_dry, policy)
     except ConfigError as exc:
@@ -192,14 +214,22 @@ def run(
 
     started_at = datetime.now(_UTC)
     try:
-        interaction = client.interactions.create(**kwargs)
+        create_result = client.interactions.create(**kwargs)
     except Exception as exc:  # pragma: no cover - surface SDK errors as GdrError
         console.print(f"[red]Failed to start research:[/red] {exc}")
         raise typer.Exit(code=5) from exc
 
-    interaction_id = getattr(interaction, "id", None) or (
-        interaction.get("id") if isinstance(interaction, dict) else None
-    )
+    try:
+        interaction_id = _consume_create_result(
+            create_result,
+            use_stream=use_stream,
+            console=console,
+            query=query,
+        )
+    except StreamError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=exc.exit_code) from exc
+
     if not interaction_id:
         console.print("[red]API returned no interaction id; cannot proceed.[/red]")
         raise typer.Exit(code=5)
@@ -220,12 +250,61 @@ def run(
     # wasn't known yet.)
     ctx = ctx_for_dry.model_copy(update={"output_dir": final_output_dir})
 
+    _finalize_and_render(
+        client=client,
+        ctx=ctx,
+        interaction_id=interaction_id,
+        final_output_dir=final_output_dir,
+        policy=policy,
+        started_at=started_at,
+        console=console,
+        query=query,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Small helpers kept private to this module
+# ---------------------------------------------------------------------------
+
+
+def _finalize_and_render(
+    *,
+    client: GdrClient,
+    ctx: RunContext,
+    interaction_id: str,
+    final_output_dir: Path,
+    policy: SecurityPolicy,
+    started_at: datetime,
+    console: Console,
+    query: str,
+) -> None:
+    """Fetch authoritative outputs, render artifacts, record, announce.
+
+    Split out of ``run`` to keep that function readable (and within lint
+    thresholds). The flow is:
+
+    1. Call ``.get(id=...)`` once — if terminal, use it.
+    2. Otherwise, the run is still going (most likely because we just
+       streamed through the normal path where ``interaction.complete``
+       arrives before ``status`` flips in the ``.get`` projection, or
+       because we disconnected mid-stream). Fall through to the Rich
+       live-status polling helper until terminal.
+    3. Write artifacts, append a Record, print the paths.
+    """
     try:
-        interaction = run_with_live_status(
-            client.interactions.get,
-            interaction_id,
-            console=console,
-            query=query,
+        latest = client.interactions.get(id=interaction_id)
+        status = getattr(latest, "status", None) or (
+            latest.get("status") if isinstance(latest, dict) else None
+        )
+        interaction = (
+            latest
+            if status in TERMINAL_STATUSES
+            else run_with_live_status(
+                client.interactions.get,
+                interaction_id,
+                console=console,
+                query=query,
+            )
         )
         finished_at = datetime.now(_UTC)
     except GdrError as exc:
@@ -251,9 +330,38 @@ def run(
     _print_done(console, paths)
 
 
-# ---------------------------------------------------------------------------
-# Small helpers kept private to this module
-# ---------------------------------------------------------------------------
+def _consume_create_result(
+    create_result: Any,
+    *,
+    use_stream: bool,
+    console: Console,
+    query: str,
+) -> str | None:
+    """Extract the interaction id from ``client.interactions.create()``.
+
+    For non-streaming calls the SDK returns a partial Interaction object —
+    we pull ``.id`` directly. For streaming calls it returns an iterator
+    yielding SSE events; we consume it through the live UI, which extracts
+    the id on the ``interaction.start`` event and surfaces disconnects
+    gracefully by returning the id anyway (the caller polls to finish).
+
+    Raises :class:`StreamError` on an explicit error event.
+    """
+    if not use_stream:
+        return getattr(create_result, "id", None) or (
+            create_result.get("id") if isinstance(create_result, dict) else None
+        )
+
+    def _on_disconnect(exc: Exception) -> None:
+        console.print(
+            f"[yellow]Stream disconnected ({type(exc).__name__}); "
+            f"falling through to polling.[/yellow]"
+        )
+
+    result = stream_with_live_ui(
+        create_result, console=console, query=query, on_disconnect=_on_disconnect
+    )
+    return result.interaction_id
 
 
 def _print_dry_run(console: Console, kwargs: dict[str, Any]) -> None:

@@ -1,0 +1,4 @@
+{"event_type": "interaction.start", "interaction": {"id": "int-err-002", "status": "in_progress"}}
+{"event_type": "content.start", "index": 0, "content": {"type": "text"}}
+{"event_type": "content.delta", "index": 0, "delta": {"type": "text", "text": "Starting the research..."}}
+{"event_type": "error", "error": {"code": "RATE_LIMITED", "message": "Quota exceeded for today. Try again tomorrow."}}

@@ -267,3 +267,163 @@ class TestOutputOverride:
         )
         assert result.exit_code == 0, result.output
         assert (target / "report.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# --stream / --no-stream
+# ---------------------------------------------------------------------------
+
+
+def _streaming_events(interaction_id: str) -> list[dict[str, Any]]:
+    """A minimal SSE event sequence equivalent to fixtures/streams/happy_path."""
+    return [
+        {
+            "event_type": "interaction.start",
+            "interaction": {"id": interaction_id, "status": "in_progress"},
+        },
+        {"event_type": "content.start", "index": 0, "content": {"type": "text"}},
+        {
+            "event_type": "content.delta",
+            "index": 0,
+            "delta": {"type": "text", "text": "Streamed body."},
+        },
+        {"event_type": "content.stop", "index": 0},
+        {
+            "event_type": "interaction.complete",
+            "interaction": {"id": interaction_id, "status": "completed"},
+        },
+    ]
+
+
+class TestStreaming:
+    def test_stream_flag_consumes_iterator_and_writes_artifacts(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        # `create(stream=True)` returns an iterator; `.get(id=...)` returns the
+        # authoritative terminal interaction.
+        _install_fake_sdk(
+            mocker,
+            created=iter(_streaming_events("intstream123")),
+            got=_fake_completed(id_="intstream123"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Streaming query",
+                "--stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        runs = list((tmp_path / "reports").glob("*_intstr*"))
+        assert len(runs) == 1
+        assert (runs[0] / "report.md").is_file()
+
+    def test_disconnect_mid_stream_falls_through_to_polling(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+
+        def flaky_stream() -> Any:
+            yield {
+                "event_type": "interaction.start",
+                "interaction": {"id": "intflaky789", "status": "in_progress"},
+            }
+            yield {
+                "event_type": "content.start",
+                "index": 0,
+                "content": {"type": "text"},
+            }
+            raise ConnectionError("simulated TCP drop")
+
+        _install_fake_sdk(
+            mocker,
+            created=flaky_stream(),
+            got=_fake_completed(id_="intflaky789"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Flaky query",
+                "--stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # Even with a disconnect, we fall through to polling and write artifacts.
+        runs = list((tmp_path / "reports").glob("*_intfla*"))
+        assert len(runs) == 1
+        assert (runs[0] / "report.md").is_file()
+
+    def test_stream_error_event_exits_nonzero(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        events: list[dict[str, Any]] = [
+            {
+                "event_type": "interaction.start",
+                "interaction": {"id": "interr456", "status": "in_progress"},
+            },
+            {
+                "event_type": "error",
+                "error": {"code": "RATE_LIMITED", "message": "Quota exceeded."},
+            },
+        ]
+        _install_fake_sdk(
+            mocker,
+            created=iter(events),
+            got=_fake_completed(id_="interr456"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Quota-exceeded query",
+                "--stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+        assert result.exit_code == 1  # StreamError maps to exit code 1
+        assert "RATE_LIMITED" in result.output or "Quota exceeded" in result.output
+
+    def test_no_stream_flag_uses_polling_path(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # With --no-stream, create() should NOT be called with stream=True.
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake_interactions = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intnostr", status="in_progress"),
+            got=_fake_completed(id_="intnostr"),
+        )
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Plain query",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        call_kwargs = fake_interactions.create.call_args.kwargs
+        assert call_kwargs.get("stream") is not True

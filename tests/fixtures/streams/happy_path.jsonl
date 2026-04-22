@@ -1,0 +1,10 @@
+{"event_type": "interaction.start", "interaction": {"id": "int-happy-001", "status": "in_progress"}}
+{"event_type": "content.start", "index": 0, "content": {"type": "thought"}}
+{"event_type": "content.delta", "index": 0, "delta": {"type": "thought_summary", "content": {"text": "Let me start by searching for recent papers."}}}
+{"event_type": "content.stop", "index": 0}
+{"event_type": "content.start", "index": 1, "content": {"type": "text"}}
+{"event_type": "content.delta", "index": 1, "delta": {"type": "text", "text": "# Research Report\n\n"}}
+{"event_type": "content.delta", "index": 1, "delta": {"type": "text", "text": "## Introduction\n"}}
+{"event_type": "content.delta", "index": 1, "delta": {"type": "text", "text": "TPUs were introduced in 2015 as a custom ASIC for ML workloads."}}
+{"event_type": "content.stop", "index": 1}
+{"event_type": "interaction.complete", "interaction": {"id": "int-happy-001", "status": "completed", "usage": {"total_tokens": 5000}}}

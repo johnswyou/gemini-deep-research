@@ -1,0 +1,7 @@
+{"event_type": "interaction.start", "interaction": {"id": "int-disc-004", "status": "in_progress"}}
+{"event_type": "content.start", "index": 0, "content": {"type": "thought"}}
+{"event_type": "content.delta", "index": 0, "delta": {"type": "thought_summary", "content": {"text": "Reading source material."}}}
+{"event_type": "content.stop", "index": 0}
+{"event_type": "content.start", "index": 1, "content": {"type": "text"}}
+{"event_type": "content.delta", "index": 1, "delta": {"type": "text", "text": "# Partial report"}}
+{"event_type": "content.delta", "index": 1, "delta": {"type": "text", "text": " that gets cut off mid-sentence"}}

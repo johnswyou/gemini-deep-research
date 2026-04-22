@@ -1,0 +1,6 @@
+{"event_type": "interaction.start", "interaction": {"id": "int-ooo-003", "status": "in_progress"}}
+{"event_type": "content.delta", "index": 0, "delta": {"type": "text", "text": "Delta arrived without a preceding content.start."}}
+{"event_type": "content.start", "index": 0, "content": {"type": "text"}}
+{"event_type": "content.delta", "index": 0, "delta": {"type": "text", "text": " Subsequent chunks still append."}}
+{"event_type": "content.stop", "index": 0}
+{"event_type": "interaction.complete", "interaction": {"id": "int-ooo-003", "status": "completed"}}
