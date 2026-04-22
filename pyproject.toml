@@ -101,6 +101,12 @@ ignore = [
 "tests/**" = ["PLR", "B011"]
 "src/gdr/cli.py" = ["PLC0415"]
 
+[tool.ruff.lint.flake8-bugbear]
+# Typer's idiom requires `typer.Option(...)` / `typer.Argument(...)` in
+# default values of command functions. These calls are side-effect-free
+# metadata constructors, so the bugbear B008 warning is spurious here.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
 [tool.ruff.format]
 quote-style = "double"
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import typer
 
 from gdr import __version__
+from gdr.commands import research
 from gdr.constants import APP_DESCRIPTION, APP_NAME
 
 app = typer.Typer(
@@ -45,7 +46,7 @@ def main(
     """
 
 
-# Subcommands are registered here as they come online:
-#   from gdr.commands import research
-#   app.command(name="research")(research.run)
-# Placeholder during Phase 1 scaffold.
+# Subcommands — each module exposes a `run` function.
+app.command(name="research", help="Run a Deep Research task and save artifacts to disk.")(
+    research.run
+)
