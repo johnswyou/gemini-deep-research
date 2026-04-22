@@ -363,68 +363,327 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
 
 ---
 
-## Phase 10 (NEXT)
+## Phase 10 (REMAINING — deferred by user, log preserved for future session)
 
 **Scope per plan:**
 
 > CI + release — GitHub Actions: lint (Ruff) + typecheck (Mypy) +
 > test (Pytest on 3.10/3.11/3.12/3.13) on PR; publish to PyPI on git
-> tag `v*` via OIDC trusted publishing. Commit:
-> `ci: GitHub Actions lint/test/release`.
+> tag `v*` via OIDC trusted publishing.
+>
+> **Plan commit message:** `ci: GitHub Actions lint/test/release`
+> (splits are fine: one commit for CI, one for release, one for docs
+> if CHANGELOG lands).
+
+### Pre-flight state (as of end of Phase 9 on 2026-04-22)
+
+Quick facts a future session should verify before starting:
+
+| Fact | Value |
+| --- | --- |
+| Current version | `0.1.0` (in BOTH `pyproject.toml` AND `src/gdr/__init__.py`) |
+| Package name on PyPI | `gemini-deep-research` (unreserved as of Phase 9) |
+| Binary | `gdr` (script entry in `pyproject.toml::[project.scripts]`) |
+| `.github/` directory | Does NOT exist yet — create it |
+| `uv.lock` | Exists at repo root — use `uv sync --frozen` in CI |
+| Test count | 348 (baseline for the CI matrix to hit) |
+| Python target | `requires-python = ">=3.10"` |
+| Build backend | `hatchling` (already configured; produces sdist + wheel cleanly) |
+
+Run `cd /Users/john.you/personal/projects/gemini-deep-research-agent
+&& uv run pytest -q && uv run ruff check . && uv run mypy src` first
+to confirm the baseline is still green before touching CI.
 
 ### Implementation checklist
 
-1. **`.github/workflows/ci.yml`** — runs on PR and push to main.
-   - Matrix over Python 3.10, 3.11, 3.12, 3.13 (exclude Windows if
-     you want to save minutes; keep macOS + Linux).
-   - Steps: checkout → setup-python → `uv sync --extra dev` →
-     `uv run ruff check .` → `uv run ruff format --check .` →
-     `uv run mypy src` → `uv run pytest -q --cov=src/gdr`.
-   - Upload coverage as artifact (or push to Codecov; optional).
-   - Cache `uv`'s cache directory for speed.
+#### 1. `.github/workflows/ci.yml`
 
-2. **`.github/workflows/release.yml`** — runs on `v*` tag push.
-   - Build sdist + wheel via `uv build`.
-   - Publish to PyPI using `pypa/gh-action-pypi-publish@release/v1`
-     with OIDC trusted publishing (no token in secrets). This needs
-     a PyPI project with a linked GitHub identity — document the
-     one-time setup in a comment.
-   - Create a GitHub Release with the built artifacts.
+Create the file. Starting skeleton (works with current `uv.lock`):
 
-3. **Consider**: a `.github/workflows/codeql.yml` for security
-   scanning, but only if we're not already getting it from
-   Dependabot / GitHub default.
+```yaml
+name: CI
 
-4. **`CHANGELOG.md`** (optional but recommended) — Keep A Changelog
-   format. v0.1.0 section listing the 9 phases shipped.
+on:
+  pull_request:
+  push:
+    branches: [main]
 
-5. **Tag + release dry-run**:
-   ```bash
-   git tag v0.1.0-rc.1
-   git push origin v0.1.0-rc.1
-   # Watch the release workflow. If it succeeds, tag v0.1.0 for real.
-   ```
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Sync deps (frozen to uv.lock)
+        run: uv sync --frozen --extra dev
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Mypy (strict)
+        run: uv run mypy src
+      - name: Pytest with coverage
+        run: uv run pytest -q --cov=src/gdr --cov-report=term-missing
+```
+
+Notes:
+- `astral-sh/setup-uv@v3` handles uv install + cache. Don't use
+  `actions/setup-python` separately — `uv python install` after that
+  is the more idiomatic flow and avoids Homebrew shadowing on macOS.
+- 3.13 is listed; if CI fails on `google-genai` compatibility, drop
+  it from the matrix (keep 3.10-3.12). Verify locally first:
+  `uv run -p 3.13 pytest -q`.
+- `--frozen` requires `uv.lock` to be current. If `pyproject.toml`
+  ever gets new deps added, run `uv lock` locally and commit the
+  update in the same PR or CI will fail with a lock mismatch.
+
+#### 2. `.github/workflows/release.yml`
+
+Create the file. Skeleton (publishes on `v*` tags, skips `-rc` tags):
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create GitHub Release
+  id-token: write   # required for PyPI OIDC trusted publishing
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Build sdist and wheel
+        run: uv build
+
+      # Upload artifacts to the GitHub Release for both RC and
+      # stable tags; gives auditors a paper trail.
+      - name: Create GitHub Release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref, 'rc') }}
+
+      # PyPI publish ONLY for stable tags (v1.2.3), never for RCs.
+      # Requires trusted publisher config on PyPI — see notes below.
+      - name: Publish to PyPI
+        if: ${{ !contains(github.ref, 'rc') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+```
+
+The `if: !contains(github.ref, 'rc')` gate is the thing that lets you
+do `v0.1.0-rc.1` as a safe dry-run. RC tags build artifacts and make
+a prerelease GitHub Release but do NOT touch PyPI.
+
+#### 3. PyPI trusted publisher — one-time setup
+
+Before pushing any tag, configure PyPI to trust this GitHub repo:
+
+1. Go to https://pypi.org/manage/account/publishing/
+   (if `gemini-deep-research` doesn't exist yet, use the "pending
+   publisher" flow at the top of that page — it creates the project
+   on first successful publish).
+2. Add a publisher with:
+   - PyPI project name: `gemini-deep-research`
+   - Owner: `gdr-cli` (or whatever org ends up owning the repo)
+   - Repository name: `gemini-deep-research`
+   - Workflow filename: `release.yml`
+   - Environment (optional but recommended): `pypi`
+3. If using an environment, add `environment: pypi` under `jobs.
+   build-and-publish` in the release workflow.
+
+No API token goes in GitHub secrets — OIDC is the whole point.
+
+#### 4. `CHANGELOG.md` (recommended)
+
+Use Keep A Changelog format. Starter content:
+
+```markdown
+# Changelog
+
+All notable changes to this project will be documented in this file.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.1.0] - 2026-04-22
+
+First public release. Ships the full CLI surface.
+
+### Added
+- `gdr research <query>` with polling, streaming with live thought
+  summaries, collaborative planning (`--plan`), and auto-recovery
+  from stream disconnects.
+- Tool + multimodal input flags: `--tool`, `--mcp NAME=URL`,
+  `--mcp-header NAME=K:V`, `--file PATH`, `--url URL`,
+  `--file-search-store NAME`, `--visualization auto|off`,
+  `--untrusted-input`.
+- History commands: `gdr ls`, `gdr show`, `gdr status`,
+  `gdr resume`, `gdr follow-up`, `gdr cancel`.
+- Operator commands: `gdr config {path,get,set,edit}` and
+  `gdr doctor [--fix]`.
+- XDG-style local state and config (`$XDG_STATE_HOME/gdr/`,
+  `$XDG_CONFIG_HOME/gdr/config.toml`), env-var overrides
+  (`GDR_STATE_DIR`, `GDR_CONFIG_PATH`).
+- Security: MCP header validation, redaction in `transcript.json`,
+  path confinement under `output_dir`, untrusted-input tool
+  filtering.
+- Artifact layout: `report.md`, `sources.json`, `metadata.json`,
+  `transcript.json`, `images/image_NNN.<ext>`.
+- 348 unit tests, 93% line coverage, ruff + mypy strict clean.
+```
+
+#### 5. Dry-run + first release
+
+After the workflows land and PyPI trusted publisher is configured:
+
+```bash
+# Sanity pass (no real work yet)
+cd /Users/john.you/personal/projects/gemini-deep-research-agent
+uv run pytest -q && uv run ruff check . && uv run mypy src
+
+# Confirm versions match
+grep '^version' pyproject.toml
+grep '__version__' src/gdr/__init__.py
+
+# Local build smoke — produces dist/*.whl and dist/*.tar.gz
+uv build
+ls -lh dist/
+
+# RC dry-run: push a tag, watch the release workflow, verify
+# artifacts show up on the GitHub Release page but NOT on PyPI.
+git tag v0.1.0-rc.1
+git push origin v0.1.0-rc.1
+
+# If the RC release workflow succeeds and the GitHub Release page
+# has both .whl and .tar.gz, promote:
+git tag v0.1.0
+git push origin v0.1.0
+
+# Final verification on a clean machine (or in a fresh venv):
+pipx install gemini-deep-research
+gdr --version    # should print "gdr 0.1.0"
+gdr doctor       # should pass most checks
+```
+
+### Files touched in Phase 10
+
+Expected diff (use as a checklist):
+
+- `.github/workflows/ci.yml`         — NEW
+- `.github/workflows/release.yml`    — NEW
+- `CHANGELOG.md`                     — NEW (optional)
+- `progress.txt`                     — add Phase 10 progress log entry
+- Possibly `pyproject.toml`          — only if we need to bump a
+  dep version or add a missing classifier; not otherwise.
+
+Do NOT touch `src/gdr/**` during Phase 10. This phase is
+infrastructure-only; any code change that sneaks in masks what CI is
+actually validating.
 
 ### Gotchas to watch for in Phase 10
-- GitHub Actions OIDC requires `id-token: write` permission in the
-  release workflow; add `permissions:` at job level or workflow
-  level. Without it the publish step fails with a cryptic error.
-- `uv sync` inside CI must use `--frozen` to respect `uv.lock`. If
-  the repo doesn't have a lock file yet, either generate one via
-  `uv lock` locally and commit, or drop `--frozen` (trades
-  reproducibility for latest resolution).
-- On macOS runners, Homebrew-installed Python can shadow
-  `actions/setup-python`. Use `uv python install` to pin a known
-  version inside the workflow.
-- Matrix on 3.13 is desirable but `google-genai` may not yet support
-  it at the version we require. Test locally first; narrow the
-  matrix if needed.
-- Pre-release tags should NOT publish to PyPI (no `v0.1.0-rc.1` on
-  PyPI). Gate the publish step with
-  `if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc')`.
-- Version string is in `pyproject.toml` and `src/gdr/__init__.py` —
-  keep them in sync. Consider a `dunamai`-style dynamic version in
-  v1.1 if drift becomes a pain point.
+
+- **OIDC permissions block.** The release workflow needs both
+  `id-token: write` (for PyPI OIDC) AND `contents: write` (for
+  GitHub Release creation). Missing either fails with a cryptic
+  error like `Resource not accessible by integration`.
+- **`uv.lock` must be committed and current.** CI uses
+  `uv sync --frozen` so any dep drift fails the build. If a PR
+  touches `pyproject.toml`, run `uv lock` in that PR too.
+- **Python 3.13 may fail on `google-genai`.** The SDK's minimum
+  supported Python shifts over time. If 3.13 goes red in CI but
+  3.10-3.12 are green, remove 3.13 from the matrix rather than
+  pin-waiting on an SDK release.
+- **macOS runners have Homebrew Python.** `actions/setup-python`
+  can collide with it silently. Using `astral-sh/setup-uv@v3`
+  followed by `uv python install <version>` avoids this — that's
+  why the skeleton above is shaped that way. Do NOT use
+  `actions/setup-python@v5` in parallel with `uv`.
+- **PyPI project name already taken.** Before configuring the
+  trusted publisher, check
+  https://pypi.org/project/gemini-deep-research/ — if it's taken
+  (someone squatted it between now and when you ship), either
+  pick a new name (update `pyproject.toml::[project].name`, the
+  README install instructions, and the docs) or go through PyPI's
+  package-squatting-dispute flow.
+- **Pre-release tags must NOT publish to PyPI.** The release
+  workflow above gates on `!contains(github.ref, 'rc')`. If you
+  ever rename RC tags to something else (`-beta`, `-dev`), update
+  that check — otherwise the next beta tag will ship to PyPI.
+- **Version drift between `pyproject.toml` and `__init__.py`.**
+  Both must match. Before tagging, grep both:
+  ```bash
+  grep '^version' pyproject.toml
+  grep '__version__' src/gdr/__init__.py
+  ```
+  If they differ, the tag will produce a wheel whose metadata and
+  `gdr --version` output disagree. A sync script or a dynamic
+  version via `hatchling.version` is a v1.1 improvement.
+- **No secret tokens in `dist/*.tar.gz`.** Hatch respects
+  `.gitignore` so `progress.txt` and `CLAUDE.md` land in the sdist
+  as-is, which is fine (they contain no secrets). But confirm with
+  `tar tzf dist/gemini_deep_research-0.1.0.tar.gz | less` before
+  the first real PyPI upload.
+- **GitHub Actions cache key evolution.** `astral-sh/setup-uv@v3`'s
+  `enable-cache: true` keys on `uv.lock` by default. If you
+  downgrade to `@v2` the key semantics differ — re-test before
+  merging a version bump to the action itself.
+
+### Success criteria for Phase 10
+
+Phase 10 is "done" when ALL of these are true:
+
+- [ ] `.github/workflows/ci.yml` exists, is green on PR, covers 3.10-3.13
+      on Linux and macOS, and runs ruff / ruff-format / mypy / pytest.
+- [ ] `.github/workflows/release.yml` exists with OIDC trusted-publisher
+      config, `id-token: write` + `contents: write` permissions, and
+      the RC-tag gate.
+- [ ] PyPI trusted publisher is configured for the
+      `gemini-deep-research` project.
+- [ ] `v0.1.0-rc.1` tag pushed; GitHub Release shows the artifacts;
+      PyPI was NOT touched.
+- [ ] `v0.1.0` tag pushed; PyPI shows `gemini-deep-research 0.1.0`;
+      `pipx install gemini-deep-research` on a fresh machine produces
+      a working `gdr` binary.
+- [ ] `CHANGELOG.md` exists (optional but strongly recommended).
+- [ ] `progress.txt` has a Phase 10 progress-log entry with commit
+      hashes and learnings.
+
+### What happens after Phase 10
+
+The project is feature-complete per the v1.0 plan. Items explicitly
+**deferred to v1.1 or later** by the original plan:
+
+- `--cost-estimate` flag (no pre-run pricing signal exists).
+- `html`/`pdf` export formats (downstream tooling on `report.md`
+  handles this well enough).
+- `gdr init` wizard (merged into `doctor --fix`).
+- SQLite store migration (`Store` protocol already factored; can
+  drop in without caller changes).
+- Custom shell-completion (Typer `--install-completion` covers it).
+- CodeQL / Dependabot security automation (GitHub defaults usually
+  cover; add only if repo policy requires it).
+- Dynamic version via `hatchling.version` (bigger refactor — OK to
+  leave as manual sync for v1.0).
 
 ---
 
