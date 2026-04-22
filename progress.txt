@@ -4,7 +4,7 @@ Python 3.10+ CLI wrapping Google's Deep Research / Deep Research Max via
 the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`.
 
 **Authoritative plan:** `/Users/john.you/.claude/plans/sunny-hopping-crown.md`
-(10 phases total; phases 1-6 complete, phase 7 next).
+(10 phases total; phases 1-7 complete, phase 8 next).
 
 ---
 
@@ -83,6 +83,29 @@ re-learn them.
   overrode `--tool`. Handled in `_parse_flag_inputs` via
   `ensure_url_context_tool`. Config defaults already include
   `url_context`, so the branch is only hit when the user narrows tools.
+- **`commands/_common.py` is for Phase-7+ family helpers** (client
+  build, record lookup, `parse_since`). Do NOT dump research-command
+  helpers here — those stay in `commands/research.py`. Rule of thumb:
+  if ≥2 command modules need it, factor it to `_common`; otherwise
+  keep it local.
+- **`parse_since` accepts three forms:** relative (`7d`, `24h`, `30m`,
+  `2w`), date-only (`YYYY-MM-DD`), and full ISO 8601 (with `Z` or
+  offset). Anything else raises `ConfigError`. The helper takes a `now`
+  kwarg for deterministic tests.
+- **`gdr resume` never overwrites artifacts by default.** On collision
+  it writes to a sibling directory suffixed `_resumed_<ts>`. The user
+  opts in to overwriting via `--force`. Record lookup is required — no
+  local record means we can't reconstruct a `RunContext`, so the
+  command exits 4 and suggests `gdr research`.
+- **`gdr cancel` detects missing SDK method gracefully.** Older
+  `google-genai` builds may not expose `interactions.cancel`. We check
+  via `getattr(client.interactions, "cancel", None)` and print a clear
+  "upgrade your SDK" message on absence (exit 4) rather than a raw
+  AttributeError.
+- **`gdr show` supports id prefix match.** If an exact id lookup misses,
+  we try `store.recent()` filtered by prefix. Returns None on ambiguity
+  so the user gets the "no record" error (avoids accidental wrong-run
+  reads when prefixes collide).
 - **Attribute-then-key `_get` helper** appears in three modules
   (`rendering.py`, `streaming.py`, `planning.py`). It bridges SDK typed
   objects (attribute access) and dict-shaped test mocks (key access) so
@@ -157,10 +180,12 @@ re-learn them.
 
 ---
 
-## Current state (as of Phase 6 complete)
+## Current state (as of Phase 7 complete)
 
 ### Commits
 ```
+<Phase 7 commit hash> feat: history, resume, follow-up, cancel          (Phase 7)
+7268ad5 docs: record Phase 6 commit hash in progress log
 bf81ec5 feat: tools, MCP, multimodal inputs, visualization (Phase 6)
 6ee27e9 feat: collaborative planning flow                (Phase 5)
 d4f128d feat: streaming with live thought summaries...    (Phase 4)
@@ -179,14 +204,35 @@ d4f128d feat: streaming with live thought summaries...    (Phase 4)
 - `gdr plan refine <id> <feedback>` — one-shot refinement
 - `gdr plan approve <id> [--query LABEL] [--stream/--no-stream]
   [--output DIR] [--dry-run] [--api-key] [--config]`
+- `gdr ls [--limit N] [--status S] [--since DATE] [--full-id] [--config]`
+- `gdr show <id> [--part text|sources|metadata|transcript|images] [--config]`
+- `gdr status <id> [--api-key] [--config]`
+- `gdr resume <id> [--force] [--api-key] [--config]`
+- `gdr follow-up <id> <question> [--max] [--stream/--no-stream]
+  [--output] [--dry-run] [--api-key] [--no-confirm] [--config]`
+- `gdr cancel <id> [--api-key] [--config]`
 - `gdr --version` / `gdr -V`
 
 ### Module map (src/gdr/)
-- `cli.py` — Typer app root; registers `research` + `plan` sub-app
+- `cli.py` — Typer app root; registers research + plan + history commands.
 - `commands/research.py` — `run()` Typer entry + `execute_research()`
   shared helper. **This is THE execution pipeline.**
 - `commands/plan.py` — `refine_cmd`, `approve_cmd`; both delegate core
   logic to shared modules.
+- `commands/_common.py` — **Shared helpers for the history/follow-up
+  family.** `build_client`, `load_cfg`, `open_store`, `lookup_record`,
+  `parse_since`, `get_attr_or_key`. Keep small — anything interesting
+  belongs in `core/`.
+- `commands/ls.py` — `gdr ls` (pure read from JsonlStore).
+- `commands/show.py` — `gdr show <id> --part …` (reads artifacts from
+  the run's output_dir). Supports prefix-match on id.
+- `commands/status.py` — `gdr status <id>` (one-shot .get, no polling).
+- `commands/resume.py` — `gdr resume <id> [--force]`; polls to
+  completion then rewrites artifacts.
+- `commands/follow_up.py` — `gdr follow-up <id> <question>`; delegates
+  to `execute_research` with `previous_interaction_id=<id>`.
+- `commands/cancel.py` — `gdr cancel <id>`; short-circuits on terminal
+  status, detects missing `interactions.cancel` method gracefully.
 - `core/client.py` — `GdrClient` SDK façade (lazy genai import, key
   fingerprint, SDK version check for interactions API).
 - `core/models.py` — Frozen Pydantic: `RunContext`, `AgentConfig`,
@@ -217,27 +263,40 @@ d4f128d feat: streaming with live thought summaries...    (Phase 4)
 - `constants.py`, `errors.py` — shared constants and typed exceptions
   mapped to exit codes (0/1/2/3/4/5/130).
 
-### Test coverage (93% overall, 280 tests)
+### Test coverage (324 tests, ruff/mypy strict clean)
+- `test_cancel_command.py` (4) — **Phase 7.** In-progress cancel,
+  already-terminal short-circuit, SDK missing cancel, API failure.
 - `test_cli.py` (4) — `--version`, `-V`, `--help`, no-args.
 - `test_client.py` (8) — GdrClient construction + fingerprint.
+- `test_commands_common.py` (12) — **Phase 7.** `parse_since` relative
+  + absolute + error cases.
 - `test_config.py` (20) — TOML parsing, env expansion, defaults.
-- `test_inputs.py` (41) — **Phase 6 flag parsing.** --file/--url/--mcp/
+- `test_follow_up_command.py` (3) — **Phase 7.** Passes
+  previous_interaction_id, dry-run, writes artifacts.
+- `test_inputs.py` (41) — Phase 6 flag parsing. --file/--url/--mcp/
   --mcp-header/--file-search-store/--visualization/--tool.
 - `test_live.py` (12) — `LiveRenderer` + `stream_with_live_ui`.
+- `test_ls_command.py` (7) — **Phase 7.** Empty store, ordering,
+  --limit, --status, --since, --full-id.
 - `test_models.py` (16) — Pydantic validation and frozen-ness.
 - `test_persistence.py` (16) — JsonlStore CRUD + paths.
 - `test_planning.py` (20) — helpers + `interactive_plan_loop`.
 - `test_plan_command.py` (9) — `gdr plan refine|approve`.
 - `test_progress.py` (11) — `poll_until_complete` with fake clock/sleep.
 - `test_rendering.py` (26) — report/sources/metadata/transcript, plus
-  **Phase 6** image extraction + write_images + report ordering.
+  Phase 6 image extraction + write_images + report ordering.
 - `test_requests.py` (19) — kwargs assembly, MCP validation, plus
-  **Phase 6** combined tools + multimodal cases.
+  Phase 6 combined tools + multimodal cases.
 - `test_research_command.py` (27) — dry-run, happy path, max confirm,
   output override, streaming, disconnect, --plan approve/refine/cancel,
-  plus **Phase 6** CLI-level flows: --tool/--mcp/--mcp-header/--file/
-  --url/--file-search-store/--visualization/--untrusted-input.
+  Phase 6 CLI-level flows.
+- `test_resume_command.py` (4) — **Phase 7.** Terminal resume, missing
+  record, suffix-on-collision, --force overwrite.
 - `test_security.py` (32) — header validation, slug, path, redaction.
+- `test_show_command.py` (9) — **Phase 7.** Each --part, unknown id,
+  prefix match, missing output_dir.
+- `test_status_command.py` (4) — **Phase 7.** Completed, in_progress
+  with thought, elapsed time, API failure.
 - `test_streaming.py` (19) — golden fixtures for all 5 event scenarios.
 
 ### Gate commands
@@ -262,75 +321,75 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
 
 ---
 
-## Phase 7 (NEXT)
+## Phase 8 (NEXT)
 
 **Scope per plan:**
 
-> History commands — `ls`, `show`, `status`, `resume`, `follow-up`,
-> `cancel`. Commit: `feat: history, resume, follow-up, cancel`.
+> Operator commands — `config`, `doctor --fix`. Commit:
+> `feat: config and doctor commands`.
 
 ### Implementation checklist
 
-1. **`gdr ls [--limit N] [--status S] [--since DATE]`** — reads
-   `JsonlStore` via `Store.recent()` and pretty-prints a table (Rich).
-   Columns: id, created_at, status, agent, query truncated, tokens.
-   Needs a new `commands/ls.py` Typer entry.
+1. **`gdr config get|set|edit|path`** — TOML config management.
+   - `gdr config path` → print `~/.config/gdr/config.toml` (respects
+     `$GDR_CONFIG_PATH` and `$XDG_CONFIG_HOME`).
+   - `gdr config get [KEY]` → print the full resolved config (YAML or
+     pretty-printed TOML) or the value at `KEY` (dot-separated path,
+     e.g. `mcp_servers.factset.url`).
+   - `gdr config set KEY VALUE` → write `KEY = VALUE` into the config
+     TOML, creating the file if missing. Preserve comments/whitespace
+     via `tomlkit` if we want to be nice; `tomllib` is read-only.
+   - `gdr config edit` → open `$EDITOR` (fallback: `vi`) on the config
+     path, creating a minimal template if the file doesn't exist yet.
 
-2. **`gdr show <id> [--part text|thoughts|sources|images]`** — look up
-   the record in `JsonlStore` to find `output_dir`, then print the
-   artifact. `--part text` (default) prints `report.md`; `--part
-   sources` → `sources.json` contents; `--part images` → list image
-   files. Needs a new `commands/show.py`.
+2. **`gdr doctor [--fix]`** — env/SDK/API-key/network/output-dir
+   validation. Prints a list of checks with pass/fail/warning status.
+   - Check: Python ≥ 3.10.
+   - Check: `google-genai` installed and ≥ `MIN_GENAI_VERSION`.
+   - Check: `GEMINI_API_KEY` available (env or config); if set, show a
+     fingerprint (first 4 + last 4 chars).
+   - Check: network reachability to `generativelanguage.googleapis.com`
+     (1 DNS lookup, don't actually call the API).
+   - Check: `output_dir` exists and is writable.
+   - Check: `state_dir` exists and is writable.
+   - With `--fix`: create a minimal `config.toml` if missing, create
+     the output + state directories, and print next-step hints.
 
-3. **`gdr status <id>`** — calls `client.interactions.get(id=...)` and
-   prints current status + elapsed time + last thought (if still
-   streaming). Useful for detached runs where we lost the stream but
-   want a quick check. Needs a new `commands/status.py`.
+3. **New modules**
+   - `commands/config.py` — Typer sub-app with 4 subcommands.
+   - `commands/doctor.py` — a single Typer entry printing a table of
+     check results.
+   - Consider adding `tomlkit>=0.13` to dependencies for
+     comment-preserving writes; fallback to plain string concatenation
+     if we want to keep dependencies minimal.
 
-4. **`gdr resume <id>`** — re-attach to a running interaction. If
-   still streaming, open a new stream (or just poll — the SDK may or
-   may not support resume via `last_event_id`; fall back to polling and
-   document that partial stream history from the pre-disconnect period
-   is lost). If terminal, skip to render. Reuses `execute_research`
-   machinery but with only the post-create tail (`_finalize_and_render`
-   equivalent). Probably needs a small refactor to expose that tail as
-   a public helper.
+4. **Tests** — roughly +20-25
+   - `test_config_command.py` — get/set/path/edit (mock `$EDITOR`).
+   - `test_doctor_command.py` — each check in a parametrized matrix,
+     plus `--fix` happy path.
 
-5. **`gdr follow-up <id> <question>`** — create a new interaction with
-   `previous_interaction_id=<id>` and the new question as input. Runs
-   the full research pipeline. Reuses `execute_research` with a
-   `previous_interaction_id` — most of the machinery is already there
-   from the `--plan` flow.
+### Gotchas to watch for in Phase 8
+- Writing TOML with comments is annoying. `tomllib` is read-only in
+  stdlib; `tomlkit` preserves comments but adds a dep. For MVP we can
+  use a naive string-formatter that regenerates the file from scratch
+  — users lose their comments, but `gdr config set` is rarely used
+  compared to hand-editing. Document the tradeoff.
+- `gdr doctor` must NOT call the real API (would consume quota on a
+  health check). Use DNS lookup or a lightweight HEAD to a public
+  Google endpoint to probe network.
+- `--fix` must be idempotent. Running `gdr doctor --fix` twice should
+  be safe and produce the same state. Test this explicitly.
+- `gdr config edit` with a missing `$EDITOR` should print a clear
+  hint, not crash. Also sanitize the editor string (no shell
+  injection) — use `subprocess.run([editor, path])` with a list.
+- `gdr config set KEY VALUE` needs type inference: bool, int, string
+  should map correctly. Quote strings with spaces or special chars.
+  Reject keys that pydantic wouldn't accept by round-tripping through
+  `Config.model_validate` after the write.
 
-6. **`gdr cancel <id>`** — call `client.interactions.cancel(id=...)` if
-   that's a public method, else raise and document why. If the SDK
-   doesn't support cancel, v1 may need to remove this command.
-
-7. **Tests** — roughly +30-40 covering:
-   - `test_ls_command.py` — filter by status/since/limit.
-   - `test_show_command.py` — each --part value.
-   - `test_status_command.py` — terminal vs in-progress.
-   - `test_resume_command.py` — happy + re-polling cases.
-   - `test_follow_up_command.py` — create with previous_interaction_id.
-   - `test_cancel_command.py` — if supported.
-
-### Gotchas to watch for in Phase 7
-- `JsonlStore.recent()` is chronological (most recent first). `ls
-  --since DATE` should parse human dates (`yesterday`, `2026-04-01`,
-  etc.) via a small helper — don't just accept ISO.
-- `show <id>` needs the `output_dir` from the record. If the record
-  predates Phase 6 images it won't have an `images/` subdir — code
-  defensively, don't crash when missing.
-- `resume` after a terminal status should skip straight to
-  `write_artifacts` — but the run's `output_dir` in the record may
-  already have files from the original run. Decide: overwrite or
-  error? Probably error with a helpful message + `--force` flag.
-- Record schema is frozen (Pydantic). If Phase 7 needs a new field
-  (e.g. `last_followup_id`), bump schema and handle old records via
-  optional fields.
-- `follow-up` should handle the Max-confirmation gate the same way
-  `--max` does — if the original run used Max and the follow-up
-  doesn't specify otherwise, inherit. But flag overrides win.
+### What phases 9+ need from Phase 8
+- Nothing structural. Phase 9 is docs (README/USAGE/MCP/examples);
+  Phase 10 is CI + PyPI release. Neither touches runtime behavior.
 
 ---
 
@@ -360,39 +419,64 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
   parsers live here; every parser raises `ConfigError` so the CLI's
   existing exit-code-4 path covers everything uniformly.
 - 280 tests pass (+68 from Phase 5), 93% coverage, ruff/mypy clean.
-- Files changed:
-  - `src/gdr/core/inputs.py` (new) — flag parsers
-  - `src/gdr/commands/research.py` — wired flags, added
-    `_parse_flag_inputs` helper, extended `_build_run_context` and
-    `execute_research` signatures
-  - `src/gdr/core/rendering.py` — image extraction + writing + report
-    links
-  - `tests/unit/test_inputs.py` (new, 41 tests)
-  - `tests/unit/test_rendering.py` — image round-trip tests (+11)
-  - `tests/unit/test_requests.py` — combined-tools/multimodal cases
-    (+6)
-  - `tests/unit/test_research_command.py` — 9 new CLI-level classes
-    (+9 tests): TestToolFlag, TestMcpFlag, TestFileFlag, TestUrlFlag,
-    TestFileSearchStoreFlag, TestVisualizationFlag, TestUntrustedInputFlag
+
+### 2026-04-22 — Phase 7 complete (history, resume, follow-up, cancel)
+- Shipped six new commands: `gdr ls`, `gdr show`, `gdr status`,
+  `gdr resume`, `gdr follow-up`, `gdr cancel`. All registered as
+  top-level Typer commands in `cli.py`.
+- New shared helper module `src/gdr/commands/_common.py` with:
+  * `build_client`, `load_cfg`, `open_store`, `lookup_record`
+  * `parse_since` — handles relative (7d/24h/30m/2w), date-only, and
+    ISO 8601 formats. `ConfigError` on anything else.
+  * `get_attr_or_key` — the attribute-then-key helper, but made
+    public so command modules don't reach into private names.
+- `gdr ls` uses `Store.recent()` with filters; Rich table output;
+  shortens ids to 12 chars by default (`--full-id` to see everything).
+- `gdr show` renders each --part with Rich; supports id prefix match.
+  Exit 4 on unknown id or missing output_dir.
+- `gdr status` is a one-shot `.get()` with colored status, elapsed
+  time (when local record found), token count, and last thought.
+- `gdr resume` reconstructs `RunContext` from the record, polls to
+  completion if still in-progress, and writes artifacts. Collision
+  handling: writes to `<original>_resumed_<ts>` sibling dir unless
+  `--force` is passed.
+- `gdr follow-up` is ~50 lines — thin wrapper around
+  `execute_research(previous_interaction_id=<id>, api_input=<question>)`.
+- `gdr cancel` checks current status first (short-circuits on
+  terminal) and detects missing SDK method via `getattr` guard.
+- 324 tests pass (+44 from Phase 6), ruff/mypy strict clean.
+- Files added:
+  - `src/gdr/commands/_common.py` (new)
+  - `src/gdr/commands/ls.py` (new)
+  - `src/gdr/commands/show.py` (new)
+  - `src/gdr/commands/status.py` (new)
+  - `src/gdr/commands/resume.py` (new)
+  - `src/gdr/commands/follow_up.py` (new)
+  - `src/gdr/commands/cancel.py` (new)
+  - `tests/unit/test_commands_common.py` (new, 12 tests)
+  - `tests/unit/test_ls_command.py` (new, 7 tests)
+  - `tests/unit/test_show_command.py` (new, 9 tests)
+  - `tests/unit/test_status_command.py` (new, 4 tests)
+  - `tests/unit/test_resume_command.py` (new, 4 tests)
+  - `tests/unit/test_follow_up_command.py` (new, 3 tests)
+  - `tests/unit/test_cancel_command.py` (new, 4 tests)
+- Files modified:
+  - `src/gdr/cli.py` — register 6 new commands
 - **Learnings for future iterations:**
-  - Typer's `list[str] = typer.Option([], ...)` cleanly handles
-    repeatable flags. No custom callback needed. Default `[]` is safe
-    with `extend-immutable-calls = ["typer.Option"]` already set.
-  - When extending a function (`execute_research`) with many new
-    kwargs, prefer a few derived-domain kwargs (tuple of McpSpec, etc.)
-    over a bag of primitive flags. Keeps the boundary between parsing
-    and orchestration clean.
-  - `mimetypes.guess_extension("image/jpeg")` returns `.jpe` on macOS.
-    Tests should check the prefix, not the exact extension.
-  - For MCP header injection tests, an `\r\n` inside the value is
-    caught at `build_tools()` time via `policy.validate_mcp_headers`;
-    the parsing layer doesn't need duplicate logic.
-  - Auto-untrusted mode (triggered by `--file`/`--url` +
-    `safe_untrusted=True`) needs a manual test because most test
-    configs don't attach files. Write a dedicated test that exercises
-    the auto-trigger path; don't rely on the explicit `--untrusted-input`
-    test to cover both.
-  - Ruff may reformat newly written modules on `ruff format` — run
-    format AFTER writing, then run lint/mypy/test in that order so
-    you catch format-induced noise before the final pass.
+  - Typer accepts hyphenated command names via `app.command("follow-up")`;
+    the underlying function lives in `follow_up.py` (Python naming).
+  - `Enum` subclassing `str, Enum` works seamlessly with Typer as a
+    `--part` choice; values are auto-documented in `--help`.
+  - Tests that need a pre-seeded `JsonlStore` should write via the
+    `JsonlStore.open(path)` API (not hand-craft the file) to avoid
+    subtle format drift — the `Record.model_dump_json` shape is
+    authoritative.
+  - When typing Store protocol methods accept `protocol-only` calls,
+    use the real `Store` import instead of `object` — mypy catches the
+    difference and picks up return-type narrowing.
+  - `mimetypes.guess_extension("image/jpeg")` returns `.jpe` on stdlib;
+    tests covering filenames should match on prefix, not exact ext.
+  - `ruff format` often reformats line-wrapping decisions on new files
+    — run format AFTER writing, then the lint/mypy/test gate, to avoid
+    noise in the final pass.
 ---

@@ -9,7 +9,7 @@ from __future__ import annotations
 import typer
 
 from gdr import __version__
-from gdr.commands import plan, research
+from gdr.commands import cancel, follow_up, ls, plan, research, resume, show, status
 from gdr.constants import APP_DESCRIPTION, APP_NAME
 
 app = typer.Typer(
@@ -51,3 +51,11 @@ app.command(name="research", help="Run a Deep Research task and save artifacts t
     research.run
 )
 app.add_typer(plan.app, name="plan")
+app.command(name="ls", help="List recent interactions from the local store.")(ls.run)
+app.command(name="show", help="Print a saved artifact from a prior research run.")(show.run)
+app.command(name="status", help="Check the current status of an interaction.")(status.run)
+app.command(name="resume", help="Reattach to a running or completed interaction.")(resume.run)
+app.command(
+    name="follow-up", help="Ask a follow-up question using a prior interaction as context."
+)(follow_up.run)
+app.command(name="cancel", help="Cancel an in-progress interaction.")(cancel.run)
