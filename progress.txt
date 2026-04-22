@@ -4,7 +4,7 @@ Python 3.10+ CLI wrapping Google's Deep Research / Deep Research Max via
 the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`.
 
 **Authoritative plan:** `/Users/john.you/.claude/plans/sunny-hopping-crown.md`
-(10 phases total; phases 1-7 complete, phase 8 next).
+(10 phases total; phases 1-8 complete, phase 9 next).
 
 ---
 
@@ -106,6 +106,27 @@ re-learn them.
   we try `store.recent()` filtered by prefix. Returns None on ambiguity
   so the user gets the "no record" error (avoids accidental wrong-run
   reads when prefixes collide).
+- **`gdr config set` regenerates the TOML file** from the parsed dict.
+  Comments are lost. Use `gdr config edit` as the escape hatch for
+  comment-preserving or nested changes. This was a deliberate choice
+  to avoid adding `tomli-w`/`tomlkit` as a dependency.
+- **`gdr config set` validates via Pydantic before writing.** The new
+  value goes into the existing dict, and `Config.model_validate` runs
+  against the whole thing. If validation fails (unknown key, bad enum
+  value, bad type) we refuse to touch the file and exit 4. Means
+  users can't get the config into a half-broken state.
+- **`gdr config path` uses `typer.echo` (plain stdout), not
+  `console.print`.** Rich wraps long paths at terminal width; scripts
+  like `path=$(gdr config path)` need the raw string. Same rule applies
+  to any command whose output is primarily machine-readable.
+- **`gdr doctor` probes network via DNS lookup, not an API call.**
+  `socket.gethostbyname("generativelanguage.googleapis.com")` costs
+  zero API quota and is the right proxy for "can I reach Google".
+  Tests patch `gdr.commands.doctor.socket.gethostbyname` via an
+  autouse fixture so the suite never actually hits DNS.
+- **`gdr doctor --fix` is idempotent.** Re-running it never re-creates
+  existing files/dirs. The test suite exercises this explicitly by
+  running `--fix` twice back-to-back and asserting both exits are 0.
 - **Attribute-then-key `_get` helper** appears in three modules
   (`rendering.py`, `streaming.py`, `planning.py`). It bridges SDK typed
   objects (attribute access) and dict-shaped test mocks (key access) so
@@ -180,10 +201,12 @@ re-learn them.
 
 ---
 
-## Current state (as of Phase 7 complete)
+## Current state (as of Phase 8 complete)
 
 ### Commits
 ```
+<Phase 8 commit hash> feat: config and doctor commands            (Phase 8)
+995e5d2 docs: record Phase 7 commit hash in progress log
 15b7d1c feat: history, resume, follow-up, cancel          (Phase 7)
 7268ad5 docs: record Phase 6 commit hash in progress log
 bf81ec5 feat: tools, MCP, multimodal inputs, visualization (Phase 6)
@@ -211,6 +234,8 @@ d4f128d feat: streaming with live thought summaries...    (Phase 4)
 - `gdr follow-up <id> <question> [--max] [--stream/--no-stream]
   [--output] [--dry-run] [--api-key] [--no-confirm] [--config]`
 - `gdr cancel <id> [--api-key] [--config]`
+- `gdr config {path,get,set,edit} [--config PATH]`
+- `gdr doctor [--fix] [--config PATH]`
 - `gdr --version` / `gdr -V`
 
 ### Module map (src/gdr/)
@@ -233,6 +258,14 @@ d4f128d feat: streaming with live thought summaries...    (Phase 4)
   to `execute_research` with `previous_interaction_id=<id>`.
 - `commands/cancel.py` — `gdr cancel <id>`; short-circuits on terminal
   status, detects missing `interactions.cancel` method gracefully.
+- `commands/config.py` — `gdr config` Typer sub-app with `path/get/set/edit`.
+  Pure-Python TOML writer (no `tomli-w` dep) covering the Config shape.
+  Comment preservation = not supported; `gdr config edit` is the escape
+  hatch for complex/nested changes.
+- `commands/doctor.py` — `gdr doctor [--fix]`. Runs 7 checks (Python,
+  google-genai, config file, API key, network DNS, output_dir,
+  state_dir) and prints a Rich table. `--fix` creates missing dirs +
+  config template. Exit 0 on warn-only, 4 on any failure.
 - `core/client.py` — `GdrClient` SDK façade (lazy genai import, key
   fingerprint, SDK version check for interactions API).
 - `core/models.py` — Frozen Pydantic: `RunContext`, `AgentConfig`,
@@ -263,13 +296,20 @@ d4f128d feat: streaming with live thought summaries...    (Phase 4)
 - `constants.py`, `errors.py` — shared constants and typed exceptions
   mapped to exit codes (0/1/2/3/4/5/130).
 
-### Test coverage (324 tests, ruff/mypy strict clean)
-- `test_cancel_command.py` (4) — **Phase 7.** In-progress cancel,
+### Test coverage (348 tests, ruff/mypy strict clean)
+- `test_cancel_command.py` (4) — Phase 7. In-progress cancel,
   already-terminal short-circuit, SDK missing cancel, API failure.
 - `test_cli.py` (4) — `--version`, `-V`, `--help`, no-args.
 - `test_client.py` (8) — GdrClient construction + fingerprint.
-- `test_commands_common.py` (12) — **Phase 7.** `parse_since` relative
+- `test_commands_common.py` (12) — Phase 7. `parse_since` relative
   + absolute + error cases.
+- `test_config_command.py` (16) — **Phase 8.** path/get/set/edit
+  subcommands. Includes nested-table preservation test, nested-key
+  rejection, invalid-value rejection, editor mock tests.
+- `test_doctor_command.py` (8) — **Phase 8.** All-pass happy path,
+  missing API key (fail), DNS failure (fail), missing config (warn),
+  --fix creates dirs + template, --fix idempotency, malformed config,
+  non-writable output_dir.
 - `test_config.py` (20) — TOML parsing, env expansion, defaults.
 - `test_follow_up_command.py` (3) — **Phase 7.** Passes
   previous_interaction_id, dry-run, writes artifacts.
@@ -321,75 +361,70 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
 
 ---
 
-## Phase 8 (NEXT)
+## Phase 9 (NEXT)
 
 **Scope per plan:**
 
-> Operator commands — `config`, `doctor --fix`. Commit:
-> `feat: config and doctor commands`.
+> Docs + examples — `README.md` (GIF, install, quickstart),
+> `docs/USAGE.md`, `docs/MCP.md`, `docs/TROUBLESHOOTING.md`,
+> `examples/*.sh`. Commit: `docs: usage guide, MCP how-to, examples`.
 
 ### Implementation checklist
 
-1. **`gdr config get|set|edit|path`** — TOML config management.
-   - `gdr config path` → print `~/.config/gdr/config.toml` (respects
-     `$GDR_CONFIG_PATH` and `$XDG_CONFIG_HOME`).
-   - `gdr config get [KEY]` → print the full resolved config (YAML or
-     pretty-printed TOML) or the value at `KEY` (dot-separated path,
-     e.g. `mcp_servers.factset.url`).
-   - `gdr config set KEY VALUE` → write `KEY = VALUE` into the config
-     TOML, creating the file if missing. Preserve comments/whitespace
-     via `tomlkit` if we want to be nice; `tomllib` is read-only.
-   - `gdr config edit` → open `$EDITOR` (fallback: `vi`) on the config
-     path, creating a minimal template if the file doesn't exist yet.
+1. **`README.md`** — the front door. Should contain:
+   - Install: `pipx install gemini-deep-research` (when published) or
+     `uv pip install -e .` from this repo.
+   - Quickstart: `export GEMINI_API_KEY=...; gdr research "..."`.
+   - A terminal recording (GIF or asciinema link) of a real run.
+   - A feature table (tools, MCP, planning, streaming, etc.).
+   - Link to `docs/USAGE.md` for detail.
 
-2. **`gdr doctor [--fix]`** — env/SDK/API-key/network/output-dir
-   validation. Prints a list of checks with pass/fail/warning status.
-   - Check: Python ≥ 3.10.
-   - Check: `google-genai` installed and ≥ `MIN_GENAI_VERSION`.
-   - Check: `GEMINI_API_KEY` available (env or config); if set, show a
-     fingerprint (first 4 + last 4 chars).
-   - Check: network reachability to `generativelanguage.googleapis.com`
-     (1 DNS lookup, don't actually call the API).
-   - Check: `output_dir` exists and is writable.
-   - Check: `state_dir` exists and is writable.
-   - With `--fix`: create a minimal `config.toml` if missing, create
-     the output + state directories, and print next-step hints.
+2. **`docs/USAGE.md`** — long-form command reference.
+   - One section per command (research, plan, ls, show, status,
+     resume, follow-up, cancel, config, doctor).
+   - Exit-code table.
+   - Output artifact layout reference.
 
-3. **New modules**
-   - `commands/config.py` — Typer sub-app with 4 subcommands.
-   - `commands/doctor.py` — a single Typer entry printing a table of
-     check results.
-   - Consider adding `tomlkit>=0.13` to dependencies for
-     comment-preserving writes; fallback to plain string concatenation
-     if we want to keep dependencies minimal.
+3. **`docs/MCP.md`** — MCP server how-to.
+   - Anatomy of `--mcp NAME=URL` + `--mcp-header NAME=K:V`.
+   - Header injection protection + redaction behavior.
+   - TOML `[mcp_servers.<name>]` form.
+   - When `--untrusted-input` flips you to safe-mode.
 
-4. **Tests** — roughly +20-25
-   - `test_config_command.py` — get/set/path/edit (mock `$EDITOR`).
-   - `test_doctor_command.py` — each check in a parametrized matrix,
-     plus `--fix` happy path.
+4. **`docs/TROUBLESHOOTING.md`** — common failure modes.
+   - Missing API key (exit 4).
+   - Stream disconnect (fallback to polling).
+   - Max timeout (60min cap, exit 3).
+   - Config load failures.
 
-### Gotchas to watch for in Phase 8
-- Writing TOML with comments is annoying. `tomllib` is read-only in
-  stdlib; `tomlkit` preserves comments but adds a dep. For MVP we can
-  use a naive string-formatter that regenerates the file from scratch
-  — users lose their comments, but `gdr config set` is rarely used
-  compared to hand-editing. Document the tradeoff.
-- `gdr doctor` must NOT call the real API (would consume quota on a
-  health check). Use DNS lookup or a lightweight HEAD to a public
-  Google endpoint to probe network.
-- `--fix` must be idempotent. Running `gdr doctor --fix` twice should
-  be safe and produce the same state. Test this explicitly.
-- `gdr config edit` with a missing `$EDITOR` should print a clear
-  hint, not crash. Also sanitize the editor string (no shell
-  injection) — use `subprocess.run([editor, path])` with a list.
-- `gdr config set KEY VALUE` needs type inference: bool, int, string
-  should map correctly. Quote strings with spaces or special chars.
-  Reject keys that pydantic wouldn't accept by round-tripping through
-  `Config.model_validate` after the write.
+5. **`examples/*.sh`** — copy-paste demos.
+   - `01_basic.sh` — the shortest path to a report.
+   - `02_planning.sh` — `--plan` with refine loop.
+   - `03_mcp.sh` — attaching an MCP server.
+   - `04_multimodal.sh` — `--file` + `--url`.
+   - `05_follow_up.sh` — follow-up from a stored interaction.
 
-### What phases 9+ need from Phase 8
-- Nothing structural. Phase 9 is docs (README/USAGE/MCP/examples);
-  Phase 10 is CI + PyPI release. Neither touches runtime behavior.
+### Gotchas to watch for in Phase 9
+- README must stay accurate as the CLI surface evolves. Link to
+  `gdr <command> --help` prominently so users know where the canonical
+  reference lives.
+- Asciinema / GIF recordings become stale quickly. Prefer a terminal
+  recording that hits `--dry-run` (deterministic output) over a real
+  API call (shows slightly different output each run).
+- Don't document features that require API access if we can't show
+  them working without a real key — use `--dry-run` in demos when
+  possible.
+- The exit-code table in USAGE.md must match `errors.py`. If they
+  drift the table becomes a lie. Consider a test that asserts the
+  set of exit codes in USAGE.md matches `errors.py`.
+- Examples should use `--no-confirm` and `--api-key "$GEMINI_API_KEY"`
+  explicitly so copy-pasters see the intended pattern.
+
+### What Phase 10 needs from Phase 9
+- Nothing structural. Phase 10 is CI/release (GitHub Actions + PyPI
+  via OIDC). The only cross-phase consideration is that README should
+  mention the `pipx install` path that Phase 10 enables — wire this in
+  now so Phase 10 just flips the install source from `-e .` to PyPI.
 
 ---
 
@@ -479,4 +514,44 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
   - `ruff format` often reformats line-wrapping decisions on new files
     — run format AFTER writing, then the lint/mypy/test gate, to avoid
     noise in the final pass.
+
+### 2026-04-22 — Phase 8 complete (config and doctor commands)
+- Shipped `gdr config {path,get,set,edit}` and `gdr doctor [--fix]`.
+- `gdr config` sub-app lives in `commands/config.py` with a hand-rolled
+  TOML writer targeted at the Config shape (no `tomli-w` dep). Trade
+  comment preservation for zero deps; `gdr config edit` is the escape
+  hatch for users who want to keep comments.
+- `gdr config set` validates via `Config.model_validate` before writing
+  so invalid configs never hit disk — tested with the `thinking_summaries=maybe`
+  case.
+- `gdr doctor` runs 7 checks: Python, google-genai, config file, API
+  key, network DNS, output_dir, state_dir. Exits 4 on any fail; 0 on
+  warn-only or all-pass. `--fix` creates missing dirs and a config
+  template; idempotent (tested twice in a row).
+- 348 tests pass (+24 from Phase 7). ruff + mypy strict clean.
+- Files added:
+  - `src/gdr/commands/config.py` (new)
+  - `src/gdr/commands/doctor.py` (new)
+  - `tests/unit/test_config_command.py` (new, 16 tests)
+  - `tests/unit/test_doctor_command.py` (new, 8 tests)
+- Files modified:
+  - `src/gdr/cli.py` — register config sub-app and doctor command
+- **Learnings for future iterations:**
+  - Rich's `console.print` wraps long strings at terminal width. For
+    machine-readable single-line output (paths, ids), use
+    `typer.echo(...)` instead. The failing test was `config path` with
+    a long tmp_path — the path got split across two lines and the
+    `in result.output` assertion failed.
+  - Autouse DNS mock (`mocker.patch("...socket.gethostbyname")`) keeps
+    `test_doctor_command.py` from flaking on network-less CI. Override
+    the mock in the specific test that needs DNS to fail.
+  - `subprocess.run` linting: Ruff's S603/S607 warn by default on list
+    invocations. Keep the list form (no `shell=True`) and add `#
+    noqa: S603` with a short "list form; no shell" justification.
+  - `Config.model_validate` happily accepts defaults when the input
+    dict is empty — useful for `gdr config get` on a missing file, but
+    surprising if you expect an error. Test that behavior explicitly.
+  - `doctor`'s `--fix` uses `mkdir(parents=True, exist_ok=True)` for
+    idempotence. Tests that assert fix-twice-doesn't-crash catch the
+    regression early.
 ---

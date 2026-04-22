@@ -9,7 +9,20 @@ from __future__ import annotations
 import typer
 
 from gdr import __version__
-from gdr.commands import cancel, follow_up, ls, plan, research, resume, show, status
+from gdr.commands import (
+    cancel,
+    doctor,
+    follow_up,
+    ls,
+    plan,
+    research,
+    resume,
+    show,
+    status,
+)
+from gdr.commands import (
+    config as config_cmd,
+)
 from gdr.constants import APP_DESCRIPTION, APP_NAME
 
 app = typer.Typer(
@@ -59,3 +72,5 @@ app.command(
     name="follow-up", help="Ask a follow-up question using a prior interaction as context."
 )(follow_up.run)
 app.command(name="cancel", help="Cancel an in-progress interaction.")(cancel.run)
+app.add_typer(config_cmd.app, name="config")
+app.command(name="doctor", help="Validate the local environment for gdr.")(doctor.run)
