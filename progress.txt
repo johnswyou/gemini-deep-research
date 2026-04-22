@@ -184,7 +184,7 @@ re-learn them.
 
 ### Commits
 ```
-<Phase 7 commit hash> feat: history, resume, follow-up, cancel          (Phase 7)
+15b7d1c feat: history, resume, follow-up, cancel          (Phase 7)
 7268ad5 docs: record Phase 6 commit hash in progress log
 bf81ec5 feat: tools, MCP, multimodal inputs, visualization (Phase 6)
 6ee27e9 feat: collaborative planning flow                (Phase 5)
