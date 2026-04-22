@@ -127,6 +127,11 @@ module = ["google.*", "google.genai.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# `tomli` is only imported on Python 3.10; we run mypy on 3.11+.
+module = "tomli"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
 

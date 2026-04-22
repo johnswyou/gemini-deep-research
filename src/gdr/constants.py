@@ -32,12 +32,19 @@ TOOL_URL_CONTEXT: Final[str] = "url_context"
 TOOL_CODE_EXECUTION: Final[str] = "code_execution"
 TOOL_FILE_SEARCH: Final[str] = "file_search"
 TOOL_MCP_SERVER: Final[str] = "mcp_server"
-BUILTIN_TOOLS: Final[tuple[str, ...]] = (
+
+# "Simple" tools take no configuration beyond their type string.
+SIMPLE_TOOLS: Final[tuple[str, ...]] = (
     TOOL_GOOGLE_SEARCH,
     TOOL_URL_CONTEXT,
     TOOL_CODE_EXECUTION,
-    TOOL_FILE_SEARCH,
 )
+# "Configured" tools require extra fields (store names, URLs, headers).
+CONFIGURED_TOOLS: Final[tuple[str, ...]] = (TOOL_FILE_SEARCH, TOOL_MCP_SERVER)
+ALL_TOOLS: Final[tuple[str, ...]] = SIMPLE_TOOLS + CONFIGURED_TOOLS
+
+# Default tool set when the user doesn't pass `--tool` flags.
+DEFAULT_TOOLS: Final[tuple[str, ...]] = SIMPLE_TOOLS
 
 # Terminal interaction statuses.
 STATUS_COMPLETED: Final[str] = "completed"
