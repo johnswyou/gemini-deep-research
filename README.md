@@ -61,10 +61,15 @@ Each run produces a timestamped directory under `~/gdr-reports/` containing `rep
 | `gdr cancel <id>` | Cancel a running task |
 | `gdr ls` | List recent interactions |
 | `gdr show <id>` | Render a saved artifact |
-| `gdr config {get,set,edit}` | Manage the TOML config file |
+| `gdr config {path,get,set,edit}` | Manage the TOML config file |
 | `gdr doctor [--fix]` | Diagnose and optionally repair your setup |
 
 Run `gdr --help` or `gdr <command> --help` for full flag reference.
+
+See [`docs/USAGE.md`](docs/USAGE.md) for long-form command documentation,
+[`docs/MCP.md`](docs/MCP.md) for MCP server integration, and
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for common failure
+modes and recovery recipes. Runnable demos live in [`examples/`](examples/).
 
 ## Configuration
 
@@ -75,9 +80,11 @@ api_key = "env:GEMINI_API_KEY"
 default_agent = "deep-research-preview-04-2026"
 output_dir = "~/gdr-reports"
 auto_open = true
+confirm_max = true                  # prompt before running the Max agent
 default_tools = ["google_search", "url_context", "code_execution"]
-thinking_summaries = "auto"
-visualization = "auto"
+thinking_summaries = "auto"         # "auto" or "none"
+visualization = "auto"              # "auto" or "off"
+safe_untrusted = true               # auto-strip dangerous tools when --file/--url is used
 
 [mcp_servers.factset]
 url = "https://mcp.factset.com"
@@ -93,7 +100,9 @@ Deep Research agents can read files and the public web. `gdr` ships with:
 - **Header validation** for MCP servers (no CRLF injection, no reserved names).
 - **`--untrusted-input`** flag that disables `code_execution` and `mcp_server` tools for a run — use when grounding in attacker-controlled files or URLs.
 
-See [`docs/SAFETY.md`](docs/SAFETY.md) for the full threat model.
+See [`docs/MCP.md`](docs/MCP.md) for the MCP security model and
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for the
+`--untrusted-input` recipe.
 
 ## Development
 
@@ -106,7 +115,9 @@ uv run pytest -q
 
 ## Roadmap
 
-v1.0 checklist in the [plan](https://github.com/gdr-cli/gemini-deep-research/blob/main/docs/PLAN.md). Deferred to v1.1: HTML export, cost estimation, SQLite history, interactive setup wizard.
+Deferred to v1.1: HTML/PDF export, cost estimation, SQLite history
+backend, interactive setup wizard. See `docs/USAGE.md` for the
+currently-shipping surface.
 
 ## License
 

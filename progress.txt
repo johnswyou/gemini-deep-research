@@ -4,7 +4,7 @@ Python 3.10+ CLI wrapping Google's Deep Research / Deep Research Max via
 the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`.
 
 **Authoritative plan:** `/Users/john.you/.claude/plans/sunny-hopping-crown.md`
-(10 phases total; phases 1-8 complete, phase 9 next).
+(10 phases total; phases 1-9 complete, phase 10 next).
 
 ---
 
@@ -201,10 +201,12 @@ re-learn them.
 
 ---
 
-## Current state (as of Phase 8 complete)
+## Current state (as of Phase 9 complete)
 
 ### Commits
 ```
+<Phase 9 commit hash> docs: usage guide, MCP how-to, examples     (Phase 9)
+70010ef docs: record Phase 8 commit hash in progress log
 c60b2b0 feat: config and doctor commands            (Phase 8)
 995e5d2 docs: record Phase 7 commit hash in progress log
 15b7d1c feat: history, resume, follow-up, cancel          (Phase 7)
@@ -361,70 +363,68 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
 
 ---
 
-## Phase 9 (NEXT)
+## Phase 10 (NEXT)
 
 **Scope per plan:**
 
-> Docs + examples — `README.md` (GIF, install, quickstart),
-> `docs/USAGE.md`, `docs/MCP.md`, `docs/TROUBLESHOOTING.md`,
-> `examples/*.sh`. Commit: `docs: usage guide, MCP how-to, examples`.
+> CI + release — GitHub Actions: lint (Ruff) + typecheck (Mypy) +
+> test (Pytest on 3.10/3.11/3.12/3.13) on PR; publish to PyPI on git
+> tag `v*` via OIDC trusted publishing. Commit:
+> `ci: GitHub Actions lint/test/release`.
 
 ### Implementation checklist
 
-1. **`README.md`** — the front door. Should contain:
-   - Install: `pipx install gemini-deep-research` (when published) or
-     `uv pip install -e .` from this repo.
-   - Quickstart: `export GEMINI_API_KEY=...; gdr research "..."`.
-   - A terminal recording (GIF or asciinema link) of a real run.
-   - A feature table (tools, MCP, planning, streaming, etc.).
-   - Link to `docs/USAGE.md` for detail.
+1. **`.github/workflows/ci.yml`** — runs on PR and push to main.
+   - Matrix over Python 3.10, 3.11, 3.12, 3.13 (exclude Windows if
+     you want to save minutes; keep macOS + Linux).
+   - Steps: checkout → setup-python → `uv sync --extra dev` →
+     `uv run ruff check .` → `uv run ruff format --check .` →
+     `uv run mypy src` → `uv run pytest -q --cov=src/gdr`.
+   - Upload coverage as artifact (or push to Codecov; optional).
+   - Cache `uv`'s cache directory for speed.
 
-2. **`docs/USAGE.md`** — long-form command reference.
-   - One section per command (research, plan, ls, show, status,
-     resume, follow-up, cancel, config, doctor).
-   - Exit-code table.
-   - Output artifact layout reference.
+2. **`.github/workflows/release.yml`** — runs on `v*` tag push.
+   - Build sdist + wheel via `uv build`.
+   - Publish to PyPI using `pypa/gh-action-pypi-publish@release/v1`
+     with OIDC trusted publishing (no token in secrets). This needs
+     a PyPI project with a linked GitHub identity — document the
+     one-time setup in a comment.
+   - Create a GitHub Release with the built artifacts.
 
-3. **`docs/MCP.md`** — MCP server how-to.
-   - Anatomy of `--mcp NAME=URL` + `--mcp-header NAME=K:V`.
-   - Header injection protection + redaction behavior.
-   - TOML `[mcp_servers.<name>]` form.
-   - When `--untrusted-input` flips you to safe-mode.
+3. **Consider**: a `.github/workflows/codeql.yml` for security
+   scanning, but only if we're not already getting it from
+   Dependabot / GitHub default.
 
-4. **`docs/TROUBLESHOOTING.md`** — common failure modes.
-   - Missing API key (exit 4).
-   - Stream disconnect (fallback to polling).
-   - Max timeout (60min cap, exit 3).
-   - Config load failures.
+4. **`CHANGELOG.md`** (optional but recommended) — Keep A Changelog
+   format. v0.1.0 section listing the 9 phases shipped.
 
-5. **`examples/*.sh`** — copy-paste demos.
-   - `01_basic.sh` — the shortest path to a report.
-   - `02_planning.sh` — `--plan` with refine loop.
-   - `03_mcp.sh` — attaching an MCP server.
-   - `04_multimodal.sh` — `--file` + `--url`.
-   - `05_follow_up.sh` — follow-up from a stored interaction.
+5. **Tag + release dry-run**:
+   ```bash
+   git tag v0.1.0-rc.1
+   git push origin v0.1.0-rc.1
+   # Watch the release workflow. If it succeeds, tag v0.1.0 for real.
+   ```
 
-### Gotchas to watch for in Phase 9
-- README must stay accurate as the CLI surface evolves. Link to
-  `gdr <command> --help` prominently so users know where the canonical
-  reference lives.
-- Asciinema / GIF recordings become stale quickly. Prefer a terminal
-  recording that hits `--dry-run` (deterministic output) over a real
-  API call (shows slightly different output each run).
-- Don't document features that require API access if we can't show
-  them working without a real key — use `--dry-run` in demos when
-  possible.
-- The exit-code table in USAGE.md must match `errors.py`. If they
-  drift the table becomes a lie. Consider a test that asserts the
-  set of exit codes in USAGE.md matches `errors.py`.
-- Examples should use `--no-confirm` and `--api-key "$GEMINI_API_KEY"`
-  explicitly so copy-pasters see the intended pattern.
-
-### What Phase 10 needs from Phase 9
-- Nothing structural. Phase 10 is CI/release (GitHub Actions + PyPI
-  via OIDC). The only cross-phase consideration is that README should
-  mention the `pipx install` path that Phase 10 enables — wire this in
-  now so Phase 10 just flips the install source from `-e .` to PyPI.
+### Gotchas to watch for in Phase 10
+- GitHub Actions OIDC requires `id-token: write` permission in the
+  release workflow; add `permissions:` at job level or workflow
+  level. Without it the publish step fails with a cryptic error.
+- `uv sync` inside CI must use `--frozen` to respect `uv.lock`. If
+  the repo doesn't have a lock file yet, either generate one via
+  `uv lock` locally and commit, or drop `--frozen` (trades
+  reproducibility for latest resolution).
+- On macOS runners, Homebrew-installed Python can shadow
+  `actions/setup-python`. Use `uv python install` to pin a known
+  version inside the workflow.
+- Matrix on 3.13 is desirable but `google-genai` may not yet support
+  it at the version we require. Test locally first; narrow the
+  matrix if needed.
+- Pre-release tags should NOT publish to PyPI (no `v0.1.0-rc.1` on
+  PyPI). Gate the publish step with
+  `if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc')`.
+- Version string is in `pyproject.toml` and `src/gdr/__init__.py` —
+  keep them in sync. Consider a `dunamai`-style dynamic version in
+  v1.1 if drift becomes a pain point.
 
 ---
 
@@ -554,4 +554,53 @@ uv run gdr research "smoke" --dry-run --api-key AIza-xxxx-xxxx \
   - `doctor`'s `--fix` uses `mkdir(parents=True, exist_ok=True)` for
     idempotence. Tests that assert fix-twice-doesn't-crash catch the
     regression early.
+
+### 2026-04-22 — Phase 9 complete (docs + examples)
+- Shipped `docs/USAGE.md`, `docs/MCP.md`, `docs/TROUBLESHOOTING.md`
+  and five runnable `examples/*.sh` scripts. README polished with
+  accurate command table, fixed broken doc links (was pointing at
+  SAFETY.md and PLAN.md which don't exist), and expanded config
+  example.
+- No code changes — 348 tests still pass unchanged.
+- Docs content:
+  - `USAGE.md` — every command with flags, exit-code table,
+    artifact layout, config reference, env-var list.
+  - `MCP.md` — MCP flag anatomy, header validation rules,
+    redaction behavior, untrusted-input interaction, wire-shape
+    ordering, troubleshooting.
+  - `TROUBLESHOOTING.md` — exit-code-indexed fix recipes for each
+    common failure mode.
+  - `examples/01-05_*.sh` — basic / planning / MCP / multimodal /
+    follow-up. All are `chmod +x` and use `set -euo pipefail`.
+- Files added:
+  - `docs/USAGE.md`
+  - `docs/MCP.md`
+  - `docs/TROUBLESHOOTING.md`
+  - `examples/01_basic.sh`
+  - `examples/02_planning.sh`
+  - `examples/03_mcp.sh`
+  - `examples/04_multimodal.sh`
+  - `examples/05_follow_up.sh`
+- Files modified:
+  - `README.md` — fixed SAFETY.md / PLAN.md references,
+    added `config path`, added `confirm_max` / `safe_untrusted`,
+    added "Further reading" link block.
+- **Learnings for future iterations:**
+  - README had stale links to `docs/SAFETY.md` and `docs/PLAN.md`
+    from the early scaffold. Grep for `docs/` references whenever
+    adding or renaming docs to catch dangling pointers.
+  - `USAGE.md`'s exit-code table is currently hand-maintained — if
+    `errors.py` grows a new exception, the table drifts. A test that
+    greps USAGE.md for `| N |` lines vs. `errors.py` exit_code
+    attributes would be worth adding in v1.1.
+  - Shell examples should default to non-interactive flags
+    (`--no-confirm`) so they're copy-paste-safe from CI or a blog
+    post. Keep interactive flags documented but off by default.
+  - Don't document `--plan` inside follow-up examples — the flag
+    doesn't exist on follow-up (planning happens once, at the
+    parent). Tests enforce this implicitly via the follow-up
+    command's signature.
+  - Troubleshooting docs are most useful when indexed by the actual
+    error message the user sees. Write them as "if you got THIS
+    message, do THIS", not as abstract categories.
 ---
