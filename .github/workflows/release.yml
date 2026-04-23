@@ -49,17 +49,34 @@ jobs:
 
       # Upload artifacts to the GitHub Release for both RC and stable tags;
       # gives auditors a paper trail regardless of PyPI outcome.
+      # We use `gh release create` directly (not softprops) so that retag
+      # scenarios are idempotent: delete any prior release for this tag,
+      # then create fresh. The explicit file list also avoids uploading
+      # `dist/.gitignore` (hatch writes a 1-byte stub there).
       - name: Create GitHub Release with artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          draft: false
-          prerelease: ${{ contains(github.ref, 'rc') }}
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == *"-rc."* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # Idempotent cleanup: if a release already exists for this tag
+          # (from a prior failed run or a retag), delete it so we start fresh.
+          # --cleanup-tag=false keeps the git tag intact.
+          gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
+          gh release create "$TAG" \
+            dist/*.whl dist/*.tar.gz \
+            --title "$TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG
 
       # PyPI publish ONLY for stable tags (v1.2.3), never for RCs.
       # Requires trusted publisher config on PyPI for `gemini-deep-research`
       # with workflow filename `release.yml` and environment `pypi`.
+      # The `-rc.` pattern matches our convention (`v0.1.0-rc.1`) and stays
+      # consistent with the release-creation step's prerelease check.
       - name: Publish to PyPI
-        if: ${{ !contains(github.ref, 'rc') }}
+        if: ${{ !contains(github.ref, '-rc.') }}
         uses: pypa/gh-action-pypi-publish@release/v1

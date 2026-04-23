@@ -1076,3 +1076,67 @@ steps that cannot be automated from a Claude Code session:
     costs nothing (no artifacts produced, no PyPI call attempted).
     Keep the guard first - it's the cheapest failure mode.
 ---
+
+### 2026-04-23 - Phase 10 followup 3: release creation idempotency + asset glob
+- `v0.1.0-rc.1` retag workflow run (24839301960) failed at "Create
+  GitHub Release with artifacts":
+  ```
+  error finalizing release: HttpError: Validation Failed:
+  {"resource":"Release","code":"already_exists","field":"tag_name"}
+  ```
+  Two bugs in a trench coat:
+  1. `softprops/action-gh-release@v2` is not idempotent under retag.
+     The first RC run on `e124e84` created a release. Retagging
+     `v0.1.0-rc.1` to `3d115e3` (after the CHANGELOG commit)
+     triggered a second run which found the prior release AND
+     created a duplicate draft; finalization errored because the
+     tag was already associated with a release. GitHub ended up
+     with 2 releases for the same tag name.
+  2. `files: dist/*` uploaded `dist/.gitignore` alongside the sdist
+     and wheel. Hatchling writes a 1-byte `dist/.gitignore` stub
+     to auto-exclude its own output from git. Harmless at PyPI time
+     (PyPI publish uses the files in dist/ directly, not the ones
+     attached to the Release) but ugly on the Releases page.
+- Fix: replace `softprops/action-gh-release@v2` with an explicit
+  `gh release create` invocation, preceded by
+  `gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null ||
+  true` so that any prior release for the tag is cleaned before a
+  fresh one is created. Narrow the asset list to `dist/*.whl` +
+  `dist/*.tar.gz`. Also unified the RC-detection pattern to `-rc.`
+  in both the release-creation and PyPI-skip checks (was `rc`
+  bare-substring on the PyPI side, which was liberal enough to
+  accidentally match words like "archive" in a future tag name).
+- **Learnings for future iterations:**
+  - **Retagging under softprops/action-gh-release is a foot-gun.**
+    The action treats an existing release for the same tag as an
+    update target, but racy draft handling during retag corrupts
+    state. `gh release create` with an explicit pre-delete is
+    simpler and fails loudly in the clean cases. Worth the extra
+    ~10 lines of bash.
+  - **`dist/.gitignore` is a hatchling artifact.** Any workflow
+    uploading `dist/*` to external destinations (Release assets,
+    S3, CDN) should use explicit file patterns. It is not uploaded
+    to PyPI because `uv build` / twine know to ignore non-distribution
+    files.
+  - **`contains(github.ref, 'rc')` is too loose.** The ref
+    `refs/tags/v0.1.0-rc.1` happens to contain 'rc', but so would
+    `refs/tags/v1.0.0-archive`, `refs/tags/v1.0.0-verified`, etc.
+    Use `'-rc.'` (with delimiters) to match only the intended RC
+    tag format. This applies anywhere github.ref is substring-tested.
+  - **Broken-release recovery procedure** (useful reference):
+    ```bash
+    # Find the stale releases
+    gh api repos/OWNER/REPO/releases --jq \
+      '.[] | select(.tag_name=="v0.1.0-rc.1") | {id, draft, prerelease}'
+    # Delete each by ID (or by tag if unique)
+    gh release delete v0.1.0-rc.1 --yes --cleanup-tag=false
+    # Delete the tag locally and remotely, then re-push at HEAD
+    git tag -d v0.1.0-rc.1
+    git push origin :v0.1.0-rc.1
+    git tag v0.1.0-rc.1
+    git push origin v0.1.0-rc.1
+    ```
+    Whenever multiple releases collide on one tag name (rare outside
+    retag scenarios), delete by explicit release ID rather than
+    relying on tag-name-based selection.
+---
