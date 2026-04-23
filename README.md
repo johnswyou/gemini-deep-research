@@ -2,6 +2,8 @@
 
 > **Status:** Alpha. APIs and commands may change before v1.0.
 
+> **Disclaimer:** Unofficial, community-built CLI. Not affiliated with, endorsed by, or sponsored by Google LLC. "Gemini" and "Deep Research" are trademarks of Google LLC, used here nominatively to describe the APIs this tool interacts with.
+
 A terminal-first client for Google's **Gemini Deep Research** and **Deep Research Max** agents. Run long-horizon research tasks from your shell and get cleanly organized artifacts — markdown reports, charts, citations, and a full transcript — saved to disk.
 
 `gdr` is a thin, honest wrapper over the [`google-genai`](https://github.com/googleapis/python-genai) SDK. The SDK does the work; `gdr` adds ergonomics: streaming UI, safe config/secret management, local history, a collaborative planning flow, resume-after-disconnect, and safe MCP wiring.
@@ -20,7 +22,7 @@ pipx install gemini-deep-research
 uv tool install gemini-deep-research
 
 # From source (dev)
-git clone https://github.com/gdr-cli/gemini-deep-research
+git clone https://github.com/johnswyou/gemini-deep-research
 cd gemini-deep-research
 uv sync --extra dev
 uv run gdr --help

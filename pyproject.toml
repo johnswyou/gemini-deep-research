@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gemini-deep-research"
 version = "0.1.0"
-description = "Terminal-first client for Google's Gemini Deep Research and Deep Research Max agents."
+description = "Unofficial terminal-first client for Google's Gemini Deep Research and Deep Research Max agents (not affiliated with Google)."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -51,9 +51,9 @@ dev = [
 gdr = "gdr.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/gdr-cli/gemini-deep-research"
-Repository = "https://github.com/gdr-cli/gemini-deep-research"
-Issues = "https://github.com/gdr-cli/gemini-deep-research/issues"
+Homepage = "https://github.com/johnswyou/gemini-deep-research"
+Repository = "https://github.com/johnswyou/gemini-deep-research"
+Issues = "https://github.com/johnswyou/gemini-deep-research/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gdr"]
