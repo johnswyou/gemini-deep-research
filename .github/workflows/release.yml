@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create GitHub Release
+  id-token: write   # required for PyPI OIDC trusted publishing
+
+jobs:
+  build-and-publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Verify version matches tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PYPROJECT_VERSION="$(grep '^version = ' pyproject.toml | head -n1 | sed -E 's/version = "(.*)"/\1/')"
+          INIT_VERSION="$(grep '^__version__' src/gdr/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')"
+          echo "tag=$TAG pyproject=$PYPROJECT_VERSION init=$INIT_VERSION"
+          # Strip leading 'v' from tag for comparison with package versions.
+          TAG_VERSION="${TAG#v}"
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ] || [ "$TAG_VERSION" != "$INIT_VERSION" ]; then
+            echo "::error::Version mismatch: tag=$TAG_VERSION pyproject=$PYPROJECT_VERSION init=$INIT_VERSION"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      # Upload artifacts to the GitHub Release for both RC and stable tags;
+      # gives auditors a paper trail regardless of PyPI outcome.
+      - name: Create GitHub Release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: ${{ contains(github.ref, 'rc') }}
+          generate_release_notes: true
+
+      # PyPI publish ONLY for stable tags (v1.2.3), never for RCs.
+      # Requires trusted publisher config on PyPI for `gemini-deep-research`
+      # with workflow filename `release.yml` and environment `pypi`.
+      - name: Publish to PyPI
+        if: ${{ !contains(github.ref, 'rc') }}
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -863,3 +863,113 @@ The project is feature-complete per the v1.0 plan. Items explicitly
     error message the user sees. Write them as "if you got THIS
     message, do THIS", not as abstract categories.
 ---
+
+### 2026-04-23 - Phase 10 complete (CI + release infrastructure)
+- Shipped `.github/workflows/ci.yml`, `.github/workflows/release.yml`,
+  `CHANGELOG.md`. Zero `src/gdr/**` changes - pure infrastructure.
+- `ci.yml` matrix: 3.10/3.11/3.12/3.13 x ubuntu-latest/macos-latest.
+  Steps: ruff check, ruff format --check, mypy strict, pytest with
+  coverage. Uses `astral-sh/setup-uv@v3` with `enable-cache: true`
+  and `uv sync --frozen --extra dev --python ${{ matrix.python-version }}`.
+  Concurrency group cancels superseded runs per ref.
+- `release.yml` on `v*` tags: verifies tag matches BOTH `pyproject.toml`
+  and `src/gdr/__init__.py` version, runs `uv build`, attaches dist/*
+  to a GitHub Release (prerelease flag true when tag contains `rc`),
+  and publishes to PyPI via OIDC trusted publishing ONLY for non-RC
+  tags. Permissions: `id-token: write` + `contents: write`. Environment
+  `pypi` declared so the user can add branch/tag protection on PyPI
+  side. Uses `softprops/action-gh-release@v2` and
+  `pypa/gh-action-pypi-publish@release/v1`.
+- `CHANGELOG.md` follows Keep a Changelog 1.1.0. Initial 0.1.0 entry
+  captures the full shipped surface from Phases 1-9. Compare link
+  at the bottom assumes `gdr-cli/gemini-deep-research` as the GitHub
+  path - update if the org/repo name differs at publish time.
+- Pre-flight verified baseline green (348 tests, ruff lint + format,
+  mypy strict all pass). Python 3.13 probe via
+  `uv run -p 3.13 --isolated --with-editable . --extra dev pytest -q`
+  passed all 348 tests, so 3.13 stays in the CI matrix.
+- Local `uv build` smoke test produced clean `sdist` (90K) and `wheel`
+  (72K). `twine check dist/*` PASSED for both. Sdist grep confirmed
+  no progress.txt, CLAUDE.md, or .env leakage. Wheel contains only
+  `gdr/**` + dist-info (no tests).
+- Version cross-check: `pyproject.toml::version = "0.1.0"` and
+  `src/gdr/__init__.py::__version__ = "0.1.0"` match.
+- Files added:
+  - `.github/workflows/ci.yml` (47 lines)
+  - `.github/workflows/release.yml` (62 lines)
+  - `CHANGELOG.md` (57 lines)
+- Files modified:
+  - `progress.txt` - this entry.
+- No `src/gdr/**` or `tests/**` diffs. Test count unchanged at 348.
+
+### Post-Phase-10 handoff (what the user must still do manually)
+
+The workflows are live, but the first release requires a few one-time
+steps that cannot be automated from a Claude Code session:
+
+1. Push `.github/` + CHANGELOG.md to the GitHub remote so the workflows
+   register with Actions:
+   ```bash
+   git push origin main
+   ```
+2. Configure PyPI trusted publisher (pending-publisher flow is fine
+   since `gemini-deep-research` does not exist on PyPI yet):
+   - https://pypi.org/manage/account/publishing/
+   - PyPI project name: `gemini-deep-research`
+   - Owner: <GitHub org/user that owns the repo>
+   - Repository name: <repo name - probably `gemini-deep-research`>
+   - Workflow filename: `release.yml`
+   - Environment: `pypi` (the workflow declares this; must match)
+3. Optionally create a GitHub environment named `pypi` on the repo
+   (Settings -> Environments) and add branch/tag protections there.
+   Not required for the workflow to run, but good hygiene.
+4. Dry-run the release pipeline with an RC tag:
+   ```bash
+   git tag v0.1.0-rc.1
+   git push origin v0.1.0-rc.1
+   ```
+   Expected: a GitHub Release with both dist/* artifacts, marked as
+   prerelease, and NO upload to PyPI (the RC gate skips publish).
+5. Promote to stable:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+   Expected: a GitHub Release (not prerelease) plus a successful
+   PyPI publish. Verify at https://pypi.org/project/gemini-deep-research/
+6. Clean-room install smoke:
+   ```bash
+   pipx install gemini-deep-research
+   gdr --version    # should print "gdr 0.1.0"
+   gdr doctor       # should pass most checks
+   ```
+
+**Learnings for future iterations:**
+- `uv sync --frozen` and `uv run --python <X>` must specify the
+  python version explicitly in CI steps; otherwise matrix jobs
+  silently reuse the default interpreter that `setup-uv` installs,
+  which defeats the matrix. This came up in the draft ci.yml when
+  I first wrote `uv run ruff check .` without `--python`.
+- `actions/setup-python` is intentionally NOT used. `astral-sh/setup-uv`
+  + `uv python install <v>` is the idiomatic flow and avoids macOS
+  Homebrew Python shadowing. Leave it this way.
+- `twine check` (via `uv run --with twine twine check dist/*`) is a
+  cheap pre-flight that catches README rendering problems PyPI would
+  otherwise reject. Worth running before every `git tag v*`.
+- Version sync between `pyproject.toml` and `src/gdr/__init__.py`
+  is enforced at release time by the workflow's `Verify version
+  matches tag` step. A future refactor to `hatchling.version` (dynamic
+  single-source) is tracked in the "deferred to v1.1" list and would
+  remove this gate entirely.
+- `softprops/action-gh-release@v2`'s `prerelease: ${{ contains(...) }}`
+  is the right signal for humans browsing the Releases page; the
+  actual PyPI-skip gate is a separate `if:` on the publish step. Both
+  must stay in sync if the prerelease tag pattern ever changes (e.g.
+  from `rc` to `beta`).
+- sdist does NOT include `progress.txt` or `CLAUDE.md` because
+  hatchling's default file-selection only picks up tracked files
+  matching its include patterns (`src/`, `tests/`, and the top-level
+  files named in `pyproject.toml`). If either file is ever renamed
+  to something picked up by default (e.g. `CHANGELOG.md` is included,
+  by convention), re-inspect `tar tzf` output before shipping.
+---
