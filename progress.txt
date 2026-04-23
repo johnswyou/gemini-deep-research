@@ -1140,3 +1140,171 @@ steps that cannot be automated from a Claude Code session:
     retag scenarios), delete by explicit release ID rather than
     relying on tag-name-based selection.
 ---
+
+## 2026-04-23 11:30 — End-to-end CLI smoke test + UX backlog
+
+Ran a full user-facing smoke test of every README/USAGE command against
+a live Gemini API key. Detailed test matrix + raw transcripts are in
+the terminal scrollback; this entry captures only the **6 issues worth
+fixing** in a future session. Pass/fail of the other commands is not
+recorded here — if in doubt, re-run the smoke test.
+
+Token spend during the test: ~2.6M tokens across 3 live research runs
+(203k fast RISC-V, ~40k color-blue `--plan` approve, ~60k cancelled
+mid-run, plus 2.05M from a pre-existing completed record). No Max
+agent runs were executed live.
+
+### UX backlog (ordered by impact / ease)
+
+**1. `gdr status` on completed run dumps raw `[TextContent(...)]` repr**
+  - **Where:** `src/gdr/commands/status.py:99-106` (`_print_last_thought`).
+  - **What happens:** For completed runs, `get_attr_or_key(output, "summary")`
+    returns a *list* of `TextContent(text=..., type='text', annotations=None)`
+    objects. The f-string at line 106 interpolates the whole list via
+    `repr()`, producing ~2kB of `[TextContent(text="...", type='text', ...),
+    TextContent(...)]` on screen instead of the actual prose.
+  - **Fix sketch:** Before printing, if `last_thought` is a list, join the
+    `.text` (or dict `"text"`) of each element with `\n\n`. And for
+    terminal-state runs (`status in {"completed","failed","cancelled"}`),
+    arguably suppress the `Thought:` line entirely — it's the *last*
+    thought, which is only useful mid-run; for completed runs the report
+    is the source of truth.
+  - **Repro:** `uv run gdr status v1_ChdDVFhxYWRmS0JicW4xTWtQd2VIUGdRMBIX...`
+    on any completed interaction.
+  - **Priority:** HIGH — `gdr status` is on the README happy path and
+    this looks like a bug to a first-time user.
+
+**2. `gdr follow-up` always fails with API 400 on Deep Research parents**
+  - **Where:** `src/gdr/commands/follow_up.py` (the wire format is
+    correct — verified via `--dry-run`). The 400 reproduces against the
+    raw SDK with:
+    ```python
+    client.interactions.create(
+        agent="deep-research-preview-04-2026",
+        input="anything",
+        background=True,
+        previous_interaction_id="<any_completed_research_id>",
+    )
+    # → BadRequestError 400 "There was a problem processing your request."
+    ```
+    So the failure is server-side at Google, not in gdr.
+  - **Interesting contrast:** `previous_interaction_id` IS accepted in
+    the `plan_approve` path (collaborative_planning → execute). It is
+    *only* rejected when the parent is a terminal research interaction.
+    This suggests Gemini's Deep Research doesn't currently support
+    "follow-up after terminal state", only "resume an approved plan".
+  - **Fix options:**
+    (a) Document the limitation in `docs/USAGE.md` and
+        `docs/TROUBLESHOOTING.md` under `gdr follow-up`. Users will
+        hit the 400 and expect us to have said something.
+    (b) Catch the 400 and print a more actionable error:
+        "Deep Research does not currently support follow-ups on
+        completed interactions. Run a fresh `gdr research` with the
+        relevant context quoted in the query, or use
+        `gdr research --plan` + `gdr plan refine` for the
+        plan-iteration flow."
+    (c) File an issue upstream (google-genai / Gemini) asking whether
+        Deep Research follow-up is planned.
+  - **Priority:** HIGH — shipped command advertised in README/USAGE
+    but always fails.
+
+**3. `research --plan` → Cancel path doesn't print the plan id**
+  - **Where:** `src/gdr/commands/research.py:322-323` prints
+    `"[yellow]Plan cancelled.[/yellow]"` and exits. The plan interaction
+    *did* get created server-side (and was billed for), but the user has
+    no id to refine/approve later.
+  - **What's missing:** `plan refine` and `plan approve` print the id
+    on stdout (the `plan.py` implementation does this well). The
+    interactive `research --plan` loop should do the same.
+  - **Fix sketch:** In `interactive_plan_loop` (core/planning.py:203),
+    before returning `None` on cancel, print something like:
+    ```
+    Plan cancelled. You can revisit it later with:
+      gdr plan refine <plan_id> '<feedback>'
+      gdr plan approve <plan_id>
+    ```
+    Since the id is already in scope (`plan_id`), this is a two-line
+    change.
+  - **Priority:** MEDIUM — the cross-session planning flow is a
+    headline feature; the cancel path is the "oops, not now" escape.
+
+**4. `UserWarning: Interactions usage is experimental` leaks on every client build**
+  - **Where:** `src/gdr/core/client.py:82` — `if not hasattr(client,
+    "interactions"):` triggers lazy-loading of the experimental SDK
+    module, which emits the `UserWarning` before `hasattr` returns.
+  - **What users see:**
+    ```
+    /Users/.../src/gdr/core/client.py:82: UserWarning: Interactions usage is experimental and may change in future versions.
+      if not hasattr(client, "interactions"):
+    ```
+    on every invocation of `status`, `cancel`, `resume`, `follow-up`,
+    `research`, and even `config`-adjacent paths that build a client.
+  - **Fix sketch:** Wrap the probe in a `warnings.catch_warnings()`
+    block filtering out this specific message:
+    ```python
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Interactions usage is experimental.*",
+            category=UserWarning,
+            module=r"google\.genai\..*",
+        )
+        has_interactions = hasattr(client, "interactions")
+    ```
+    Or filter at module import time in `gdr/cli.py`.
+  - **Priority:** MEDIUM — purely cosmetic but present on every run,
+    so it adds noise to every screenshot/paste.
+
+**5. Streaming run cancelled externally ends with "Stream error api_error"**
+  - **Where:** `src/gdr/core/streaming.py:358-362` — `_handle_error`
+    unconditionally raises `StreamError(f"Stream error {code}: ...")`
+    when the server closes the stream. If the root cause was a
+    `gdr cancel <id>` on another terminal, the user sees a generic
+    `api_error` instead of `"Cancelled."`.
+  - **Repro:**
+    1. Terminal A: `uv run gdr research --no-confirm "<long query>"`
+    2. Terminal B (while A is streaming):
+       `uv run gdr cancel <id_from_A>`
+    3. Terminal A prints `Stream error api_error: There was a problem
+       processing your request.` and exits.
+  - **Fix sketch:** Before raising StreamError, poll the interaction
+    status once — if it's `cancelled`, emit a clean "Cancelled by
+    user; artifacts not written." message and exit 2 (the documented
+    cancelled exit code) instead of 1. Needs a status check in the
+    error path, so slightly more than a two-line change.
+  - **Priority:** LOW — rare flow, and the current behavior is at
+    least non-silent.
+
+**6. Post-cancel `status`/`cancel` returns transient 500 from the API**
+  - **Where:** After a successful `gdr cancel <id>`, calls to
+    `gdr status <id>` and re-`gdr cancel <id>` return:
+    ```
+    Error code: 500 - {'error': {'message': 'There was a problem
+    processing your request. You will not be charged.', 'code':
+    'api_error'}}
+    ```
+    `gdr cancel` maps this to exit 5 (network error).
+  - **Root cause:** Server-side — the Gemini API briefly doesn't serve
+    the interaction right after cancel. Not our bug to fix.
+  - **Fix options (client-side mitigation only):**
+    (a) In `cancel.py`, classify post-cancel 500 on the *same id we
+        just cancelled* as "transient; the cancel you just issued is
+        propagating" and exit 0 with a note, not exit 5.
+    (b) Add a single retry with short backoff for 500s in `cancel`
+        and `status`.
+    (c) Do nothing — document in TROUBLESHOOTING that this is
+        harmless transient API behavior.
+  - **Priority:** LOW — intermittent + server-side.
+
+### Suggested next-session plan
+
+Do the four HIGH/MEDIUM items together as one PR ("UX polish from
+end-to-end smoke test, 2026-04-23"):
+  - Item 1 (status prose formatting) — 10 lines + test.
+  - Item 3 (plan-cancel prints id) — 3 lines + test.
+  - Item 4 (silence experimental warning) — 5 lines + test.
+  - Item 2 (follow-up 400 handling) — docs note + targeted error
+    message; ~20 lines. Separate issue filed upstream if appropriate.
+LOW items (5, 6) can be follow-ups or deferred indefinitely.
+---
