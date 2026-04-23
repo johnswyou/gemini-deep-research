@@ -7,6 +7,16 @@ the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`
 (10 phases total; phases 1-9 complete, phase 10 next).
 
 ---
+## 2026-04-23 12:46 - Security audit pass
+- Conducted a deep security/secrets audit across runtime code, packaging/release workflows, docs/examples, and tracked repository contents.
+- Found no CRITICAL issue and no committed live secret in the current tree or scanned history.
+- Highest-severity findings: `gdr config get`/`gdr config set` can expose secrets, `gdr follow-up` drops the parent run's untrusted-input posture, and the privileged release workflow uses mutable GitHub Action tags.
+- Files changed: `progress.txt`
+- **Learnings for future iterations:**
+  - `gdr config get` prints resolved config values after `env:` expansion, so treat it as secret-sensitive output until masking/redaction is added.
+  - `gdr follow-up` does not preserve the parent run's `untrusted_input` state because local `Record` data does not currently persist that trust posture.
+  - `--dry-run` prints raw request kwargs, including MCP headers, so avoid using it with live credentials until request preview redaction exists.
+---
 
 ## Codebase Patterns
 
