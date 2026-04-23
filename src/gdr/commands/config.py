@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -229,10 +229,10 @@ def _load_toml_raw(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        parsed: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
-    return cast("dict[str, Any]", parsed)
+    return parsed
 
 
 def _write_toml(path: Path, data: dict[str, Any]) -> None:

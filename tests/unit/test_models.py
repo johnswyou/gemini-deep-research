@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,8 @@ from gdr.core.models import (
     TextPart,
     default_run_context_for_query,
 )
+
+_UTC = timezone.utc
 
 # ---------------------------------------------------------------------------
 # TextPart / MediaPart
@@ -157,7 +159,7 @@ def test_runcontext_rejects_empty_query(tmp_path: Path) -> None:
 
 
 def test_record_round_trip(tmp_path: Path) -> None:
-    now = datetime.now(UTC)
+    now = datetime.now(_UTC)
     rec = Record(
         id="abc-123",
         created_at=now,

@@ -973,3 +973,60 @@ steps that cannot be automated from a Claude Code session:
   to something picked up by default (e.g. `CHANGELOG.md` is included,
   by convention), re-inspect `tar tzf` output before shipping.
 ---
+
+### 2026-04-23 - Phase 10 followup: fix CI failures on py3.10
+- First CI run on main surfaced 2 job failures (py3.10 x {ubuntu,macos});
+  3.11/3.12/3.13 all passed on both OSes. Two distinct bugs:
+  1. `src/gdr/commands/config.py:235` used `cast("dict[str, Any]", parsed)`
+     on `tomllib.loads()` output. On py3.10 CI runners `tomli` is
+     installed (it's a conditional runtime dep
+     `python_version < '3.11'`), so mypy sees tomli's real stubs
+     returning `dict[str, Any]`, making the cast redundant and
+     tripping `--warn-unused-ignores`. On py3.11+ runners `tomli` is
+     NOT installed, `ignore_missing_imports = true` kicks in, and the
+     cast becomes necessary. Fix: use an inline variable annotation
+     `parsed: dict[str, Any] = tomllib.loads(...)` which mypy accepts
+     uniformly on both branches, then drop the `cast` import.
+  2. `tests/unit/test_models.py:5` imported `from datetime import UTC, datetime`.
+     `datetime.UTC` is py3.11+ only. The project's codebase-patterns
+     doc (top of progress.txt) explicitly mandates
+     `from datetime import timezone` with a module-level
+     `_UTC = timezone.utc` alias. The test file was the only violation.
+     Fix: apply the project pattern. Place `_UTC = timezone.utc` AFTER
+     all imports (ruff E402 would fire otherwise).
+- Verified locally on py3.10/3.12/3.13 via
+  `uv run -p <ver> --isolated --with-editable . --extra dev <gate>`:
+  all 348 tests pass, ruff lint + format clean, mypy strict clean.
+- No changes to CI/release workflows or CHANGELOG. Pure source/test
+  corrections.
+- **Learnings for future iterations:**
+  - **mypy's `python_version` setting does NOT match the interpreter's
+    conditionally-installed deps.** With
+    `[tool.mypy] python_version = "3.10"`, mypy always analyzes the
+    3.10 code branch (`import tomli as tomllib`), but *actual* stub
+    availability depends on whether tomli is installed in the current
+    environment. This makes `cast()` vs annotation choice
+    interpreter-dependent. Rule of thumb: prefer inline variable
+    annotations over `cast()` at module boundaries where a third-party
+    return type is conditionally `Any` vs `dict[...]`. `cast()` is
+    fragile under cross-version CI because `warn-unused-ignores` +
+    `redundant-cast` will fire asymmetrically.
+  - **The codebase pattern "use `_UTC = timezone.utc`" must apply to
+    tests as well as source.** The Codebase Patterns section at the
+    top of progress.txt implicitly covered tests (it says
+    "project-wide"), but the existing `grep` for compliance only ran
+    against `src/`. Future phases that add tests should `grep -r
+    "datetime import UTC\|datetime.UTC" tests/` before committing.
+  - **First push to a fresh remote is the real integration test.**
+    Local `uv run` uses whichever interpreter `.python-version` /
+    default resolution picks; it does NOT exercise the matrix unless
+    you explicitly `-p <ver> --isolated`. Pre-flight for a CI-heavy
+    phase should include an explicit 3.10 probe, not just 3.13. In
+    Phase 10 I probed 3.13 but not 3.10 - the 3.13 probe passed and
+    gave false confidence. Worth adding to the phase checklist.
+  - **`gh run view --log-failed`** truncated early (~200 lines) even
+    though 8 jobs failed steps had to be fetched. The useful filter
+    was
+    `gh run view <id> --log-failed | grep -E "error:|Found [0-9]+"`
+    to isolate mypy errors across jobs.
+---
