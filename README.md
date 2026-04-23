@@ -1,5 +1,12 @@
 # gdr — Gemini Deep Research CLI
 
+[![PyPI version](https://img.shields.io/pypi/v/gemini-deep-research.svg)](https://pypi.org/project/gemini-deep-research/)
+[![Python versions](https://img.shields.io/pypi/pyversions/gemini-deep-research.svg)](https://pypi.org/project/gemini-deep-research/)
+[![License: MIT](https://img.shields.io/pypi/l/gemini-deep-research.svg)](LICENSE)
+[![CI](https://github.com/johnswyou/gemini-deep-research/actions/workflows/ci.yml/badge.svg)](https://github.com/johnswyou/gemini-deep-research/actions/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+
 > **Status:** Alpha. APIs and commands may change before v1.0.
 
 > **Disclaimer:** Unofficial, community-built CLI. Not affiliated with, endorsed by, or sponsored by Google LLC. "Gemini" and "Deep Research" are trademarks of Google LLC, used here nominatively to describe the APIs this tool interacts with.
