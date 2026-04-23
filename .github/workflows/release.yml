@@ -28,13 +28,16 @@ jobs:
       - name: Verify version matches tag
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          # Strip leading 'v' and any '-rc.N' prerelease suffix so that
+          # tags like v0.1.0-rc.1 still match a package version of 0.1.0.
+          # Stable tags (v0.1.0) are unaffected by the second strip.
+          TAG_VERSION="${TAG#v}"
+          TAG_BASE_VERSION="${TAG_VERSION%-rc.*}"
           PYPROJECT_VERSION="$(grep '^version = ' pyproject.toml | head -n1 | sed -E 's/version = "(.*)"/\1/')"
           INIT_VERSION="$(grep '^__version__' src/gdr/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')"
-          echo "tag=$TAG pyproject=$PYPROJECT_VERSION init=$INIT_VERSION"
-          # Strip leading 'v' from tag for comparison with package versions.
-          TAG_VERSION="${TAG#v}"
-          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ] || [ "$TAG_VERSION" != "$INIT_VERSION" ]; then
-            echo "::error::Version mismatch: tag=$TAG_VERSION pyproject=$PYPROJECT_VERSION init=$INIT_VERSION"
+          echo "tag=$TAG base=$TAG_BASE_VERSION pyproject=$PYPROJECT_VERSION init=$INIT_VERSION"
+          if [ "$TAG_BASE_VERSION" != "$PYPROJECT_VERSION" ] || [ "$TAG_BASE_VERSION" != "$INIT_VERSION" ]; then
+            echo "::error::Version mismatch: base=$TAG_BASE_VERSION pyproject=$PYPROJECT_VERSION init=$INIT_VERSION"
             exit 1
           fi
 
