@@ -43,5 +43,5 @@ Deep Research / Deep Research Max via the Gemini Interactions API.
   `examples/`.
 - 348 unit tests, 93% line coverage, Ruff + Mypy strict clean.
 
-[Unreleased]: https://github.com/gdr-cli/gemini-deep-research/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/gdr-cli/gemini-deep-research/releases/tag/v0.1.0
+[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/johnswyou/gemini-deep-research/releases/tag/v0.1.0
