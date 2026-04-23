@@ -1308,3 +1308,122 @@ end-to-end smoke test, 2026-04-23"):
     message; ~20 lines. Separate issue filed upstream if appropriate.
 LOW items (5, 6) can be follow-ups or deferred indefinitely.
 ---
+
+## 2026-04-23 — Versioning + release flow cheat sheet
+
+Written down because this project's release machinery is entirely
+manual + tag-driven, and nothing auto-bumps. The next person (or
+future-you) will forget the exact sequence.
+
+### Mental model
+
+Manual versioning, tag-triggered release. Two things must happen for
+a release to fire:
+  1. Bump the literal version string in BOTH `pyproject.toml` (line
+     ~7, `version = "X.Y.Z"`) and `src/gdr/__init__.py` (the
+     `__version__ = "X.Y.Z"` line).
+  2. Push a git tag of shape `v<that-same-version>`.
+
+The tag push is what triggers `.github/workflows/release.yml`
+(`on: push: tags: "v*"`). Merging to `main` does NOT release anything.
+
+### Does cutting a version "slate" all subsequent commits for the next release?
+
+By convention yes — but nothing mechanical enforces it. After
+`v0.1.0` ships, every commit on `main` is implicitly "what will go
+into the next release." The release only happens when you manually
+bump + tag.
+
+The "what's queued for next release" list lives in `CHANGELOG.md` as
+the `## [Unreleased]` scratch section at the top. Every PR that ships
+a user-facing change should add a bullet there. When you're ready to
+release, that section gets renamed into the new version header.
+
+### Two tag flavors this project supports
+
+`release.yml` treats them differently (see lines 28-83):
+
+| Tag shape         | GitHub Release         | PyPI publish                |
+|-------------------|------------------------|-----------------------------|
+| `v0.1.0-rc.1`     | Yes, marked prerelease | **No** (gated at line 81)   |
+| `v0.1.0` (stable) | Yes, stable            | **Yes** (OIDC trusted pub)  |
+
+The version-matching guard at line 39 strips the `-rc.N` suffix
+before comparing, so `v0.1.0-rc.1`, `v0.1.0-rc.2`, and `v0.1.0` can
+all share `version = "0.1.0"` in `pyproject.toml`. That's deliberate:
+iterate on RCs at the same base version, and when you cut stable you
+don't need another bump.
+
+The PyPI gate at line 81 is `if: ${{ !contains(github.ref, '-rc.') }}`.
+The `-rc.` (with both delimiters) is narrow on purpose — see the
+earlier entry re: `contains(github.ref, 'rc')` being too loose.
+
+### Typical release flow, start to finish
+
+```bash
+# After some PRs have landed with Unreleased CHANGELOG entries:
+$EDITOR CHANGELOG.md                          # Promote [Unreleased] -> [X.Y.Z] - <today>
+                                              # Add a fresh empty [Unreleased] above it.
+                                              # Update compare/tag URLs at the bottom.
+$EDITOR pyproject.toml src/gdr/__init__.py    # Bump version in BOTH places.
+git commit -am "chore: release X.Y.Z"
+git push origin main
+
+# Optional: cut an RC first, smoke-test, then stable.
+git tag vX.Y.Z-rc.1
+git push origin vX.Y.Z-rc.1                   # -> GH prerelease, NO PyPI
+# (install via `pipx install --pip-args='--pre' gemini-deep-research`,
+#  verify it works, then proceed.)
+
+git tag vX.Y.Z
+git push origin vX.Y.Z                        # -> GH stable release + PyPI publish
+```
+
+### SemVer decisions (CHANGELOG declares strict SemVer)
+
+  - Bug fix only -> **patch**: `0.1.0` -> `0.1.1`
+  - New feature, backward-compatible -> **minor**: `0.1.0` -> `0.2.0`
+  - Breaking CLI/config change -> **major**: `1.0.0` -> `2.0.0`
+
+While < 1.0 the convention is looser: minor bumps can contain
+breaking changes. Many projects use `0.x.y` as the "we reserve the
+right to break things" signal. This project is at `0.1.0` right now.
+
+### Three places the version string lives — all MUST match
+
+  1. `pyproject.toml` line ~7: `version = "0.1.0"`
+  2. `src/gdr/__init__.py`:    `__version__ = "0.1.0"`
+  3. Git tag:                   `v0.1.0` (or `v0.1.0-rc.N`)
+
+The CI job "Verify version matches tag" (release.yml line 28-42)
+enforces this and fails fast on mismatch. If you ever see that
+failure, one of the three drifted — usually because you bumped
+pyproject and forgot `__init__.py` (or vice versa).
+
+### If something goes wrong after a tag push
+
+Delete-and-retag is supported (the release job cleans up prior
+GitHub releases before creating a new one — see lines 65-68 of
+release.yml). The broken-release recovery procedure is documented
+in the earlier "ci release hardening" entry above. PyPI is
+append-only though; a bad stable upload can only be yanked, not
+overwritten. Hence the RC-first habit for anything risky.
+
+### Current state snapshot (as of writing)
+
+  - `pyproject.toml` and `__init__.py` both at `"0.1.0"`.
+  - `CHANGELOG.md` has `## [0.1.0] - 2026-04-23` filled in (the
+    content is already finalized) and an empty `## [Unreleased]`
+    above it ready to accumulate the next round of bullets.
+  - Git tags present: `v0.1.0-rc.1` (already pushed and released as
+    a prerelease with artifacts on GitHub).
+  - To ship stable: `git tag v0.1.0 && git push origin v0.1.0`.
+    That single command kicks off GH Release + PyPI publish. No
+    other code or version changes required — the version files
+    already match.
+  - Every new commit on `main` from this point is fodder for
+    whatever you decide the next version (0.1.1 / 0.2.0 / ...)
+    will be. Add a bullet to `[Unreleased]` with each user-facing
+    change so you're not reconstructing the release notes from
+    `git log` when the time comes.
+---
