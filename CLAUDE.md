@@ -5,7 +5,7 @@ You are an autonomous coding agent working on a software project.
 ## Your Task
 
 1. Read the progress log at `progress.txt` (check Codebase Patterns section first)
-2. Read your plan, to do list, and any other saved claude artifacts from the previous session (which was compacted and gave way to the present session)
+2. Read your plan, to do list, and any other saved claude artifacts from the previous session (which may have been compacted and gave way to the present session, or the present session is a new clean slate session and we want to carry over all relevant context from the previous session to the new session)
 3. Continue with remaining work.
 4. Update CLAUDE.md files if you discover reusable patterns (see below)
 5. Append your progress to `progress.txt`
