@@ -39,7 +39,7 @@ If you discover a **reusable pattern** that future iterations should know, add i
 
 Only add patterns that are **general and reusable**, not task-specific details.
 
-## Update CLAUDE.md Files
+## Update CLAUDE.md
 
 Before committing, check if any edited files have learnings worth preserving in CLAUDE.md:
 
