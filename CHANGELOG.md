@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-04-22
+## [0.1.0] - 2026-04-23
 
 First public release. Ships the full CLI surface for driving Google's
 Deep Research / Deep Research Max via the Gemini Interactions API.
@@ -41,6 +41,9 @@ Deep Research / Deep Research Max via the Gemini Interactions API.
 - Documentation: `docs/USAGE.md`, `docs/MCP.md`,
   `docs/TROUBLESHOOTING.md`, and five runnable examples under
   `examples/`.
+- Prominent "unofficial, not affiliated with Google" disclaimer in
+  README and PyPI description. "Gemini" and "Deep Research" are
+  trademarks of Google LLC, used nominatively throughout.
 - 348 unit tests, 93% line coverage, Ruff + Mypy strict clean.
 
 [Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.0...HEAD
