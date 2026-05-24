@@ -84,6 +84,36 @@ class TestHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# Current Interactions API schema
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentSchema:
+    def test_interaction_id_captured_on_created(self) -> None:
+        agg, _ = _collect("current_schema_happy_path.jsonl")
+        assert agg.interaction_id == "int-current-001"
+
+    def test_status_updates_and_completion_are_applied(self) -> None:
+        agg, events = _collect("current_schema_happy_path.jsonl")
+        assert agg.status == "completed"
+        assert any(e.kind == "status" and e.status == "in_progress" for e in events)
+        assert agg.snapshot().completed_cleanly is True
+
+    def test_step_deltas_are_collected(self) -> None:
+        agg, events = _collect("current_schema_happy_path.jsonl")
+        snap = agg.snapshot()
+        assert snap.thoughts == ["Reviewing current sources."]
+        assert "# Current Report" in snap.text
+        assert "step events" in snap.text
+        assert [e.kind for e in events].count("text_delta") == 2
+
+    def test_thought_signatures_are_ignored_without_dropping_thought_text(self) -> None:
+        agg, events = _collect("current_schema_happy_path.jsonl")
+        assert agg.snapshot().thoughts == ["Reviewing current sources."]
+        assert not any(e.text == "opaque-signature" for e in events)
+
+
+# ---------------------------------------------------------------------------
 # Mid-stream error
 # ---------------------------------------------------------------------------
 
@@ -145,7 +175,7 @@ class TestDisconnectMidText:
 
     def test_interaction_id_still_captured(self) -> None:
         agg, _ = _collect("disconnect_mid_text.jsonl")
-        # This is the whole point of capturing on interaction.start — the
+        # This is the whole point of capturing on interaction.created/start — the
         # caller needs the id to poll for the authoritative result.
         assert agg.interaction_id == "int-disc-004"
 
@@ -202,6 +232,7 @@ class TestEmissionInvariants:
     def test_every_fixture_produces_a_start_event_first(self) -> None:
         for fixture in (
             "happy_path.jsonl",
+            "current_schema_happy_path.jsonl",
             "out_of_order.jsonl",
             "disconnect_mid_text.jsonl",
             "thought_image_text.jsonl",
