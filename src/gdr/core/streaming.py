@@ -390,13 +390,14 @@ class StreamAggregator:
 def _content_type_from_start_event(event: Any) -> str | None:
     content = _get(event, "content")
     if content is not None:
-        return _get(content, "type")
+        content_type = _get(content, "type")
+        return str(content_type) if content_type else None
 
     step = _get(event, "step")
     step_type = _get(step, "type")
     if step_type == "model_output":
         return "text"
-    return step_type
+    return str(step_type) if step_type else None
 
 
 def _infer_content_type(delta_type: str | None) -> str | None:
