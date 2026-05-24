@@ -36,7 +36,7 @@ to emissions for live rendering; the research command uses the aggregator's
 final state for logging/diagnostics only.
 
 **The final report is never reconstructed from the stream.** Per the docs,
-``interaction.complete`` during streaming has ``outputs=None``, so the
+``interaction.completed`` during streaming omits full outputs, so the
 command always re-fetches via ``client.interactions.get(id=...)`` after the
 stream ends (whether cleanly or by disconnect). Partial delta buffers are
 discarded on disconnect. This is the contract the plan committed to.
@@ -135,7 +135,7 @@ class _ImageBuilder:
 
 @dataclass
 class _ThoughtBuilder:
-    """Container for thought-summary deltas on a content.start index.
+    """Container for thought-summary deltas on a step/content index.
 
     Thoughts are almost always whole-message deltas, but we accept multiple
     chunks defensively and concatenate.
@@ -317,8 +317,8 @@ class StreamAggregator:
         delta = _get(event, "delta")
         delta_type = _get(delta, "type")
         builder = self._builders.get(int(index))
-        # Out-of-order safety: if we never saw content.start, invent a
-        # builder based on the delta type. Most APIs emit content.start,
+        # Out-of-order safety: if we never saw step/content start, invent a
+        # builder based on the delta type. Most APIs emit a start event,
         # but we never want to silently drop real data.
         if builder is None:
             builder = _make_builder(int(index), _infer_content_type(delta_type))

@@ -51,6 +51,13 @@ record.
 | `--no-confirm` | Skip the Max cost-confirmation prompt. |
 | `--config PATH` | Use an alternate config TOML. |
 
+Streaming uses the current Interactions API event schema
+(`interaction.created`, `interaction.status_update`, `step.start`,
+`step.delta`, `step.stop`, `interaction.completed`). If you need to
+avoid the live SSE connection in a script or while debugging a network
+issue, pass `--no-stream`; the task still runs in the background and
+`gdr` polls until completion.
+
 ### Examples
 
 ```bash

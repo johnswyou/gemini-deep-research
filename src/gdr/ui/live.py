@@ -38,7 +38,7 @@ class LiveStreamResult:
     callers use it to re-fetch the canonical outputs via
     ``client.interactions.get(id=...)``.
 
-    ``completed_cleanly`` is ``True`` only when an ``interaction.complete``
+    ``completed_cleanly`` is ``True`` only when an ``interaction.completed``
     event arrived. A disconnect that kills the iterator leaves it ``False``
     and the caller should fall through to polling.
     """

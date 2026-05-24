@@ -89,6 +89,22 @@ If polling also fails, you'll see the `ID printed` hint — use
 
 ---
 
+## The spinner starts but no interaction id appears
+
+Run `gdr doctor` first. If the API key and network checks pass, try:
+
+```bash
+gdr research --no-stream "your question"
+```
+
+`--no-stream` bypasses the live SSE parser and uses background polling
+only. If polling works but streaming does not, the likely cause is a
+streaming event schema mismatch or a transport issue. Current
+Interactions streams use `interaction.created`, `step.start`,
+`step.delta`, `step.stop`, and `interaction.completed` events.
+
+---
+
 ## `Research timed out after 60:00` (exit 3)
 
 A single Deep Research task is capped at 60 minutes. If your run
