@@ -302,6 +302,40 @@ def _streaming_events(interaction_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _current_streaming_events(interaction_id: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "event_type": "interaction.created",
+            "interaction": {"id": interaction_id, "status": "in_progress"},
+        },
+        {"event_type": "step.start", "index": 0, "step": {"type": "model_output"}},
+        {
+            "event_type": "step.delta",
+            "index": 0,
+            "delta": {"type": "text", "text": "Stream-only final report."},
+        },
+        {
+            "event_type": "step.delta",
+            "index": 0,
+            "delta": {
+                "type": "text_annotation_delta",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url": "https://stream.example",
+                        "title": "Stream Source",
+                    }
+                ],
+            },
+        },
+        {"event_type": "step.stop", "index": 0},
+        {
+            "event_type": "interaction.completed",
+            "interaction": {"id": interaction_id, "status": "completed"},
+        },
+    ]
+
+
 class TestStreaming:
     def test_stream_flag_consumes_iterator_and_writes_artifacts(
         self, runner: CliRunner, tmp_path: Path, mocker: Any
@@ -332,6 +366,45 @@ class TestStreaming:
         runs = list((tmp_path / "reports").glob("*_intstr*"))
         assert len(runs) == 1
         assert (runs[0] / "report.md").is_file()
+
+    def test_clean_stream_is_saved_when_terminal_get_has_no_outputs(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(
+            mocker,
+            created=iter(_current_streaming_events("intemptyget")),
+            got=SimpleNamespace(
+                id="intemptyget",
+                status="completed",
+                outputs=[],
+                usage=SimpleNamespace(total_tokens=200),
+            ),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Streaming empty get",
+                "--stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        runs = list((tmp_path / "reports").glob("*_intemp*"))
+        assert len(runs) == 1
+        report = (runs[0] / "report.md").read_text(encoding="utf-8")
+        assert "Stream-only final report." in report
+        assert "No final report text" not in report
+        assert "[Stream Source](https://stream.example)" in report
+
+        transcript = json.loads((runs[0] / "transcript.json").read_text(encoding="utf-8"))
+        assert transcript["outputs"][0]["text"] == "Stream-only final report."
 
     def test_disconnect_mid_stream_falls_through_to_polling(
         self, runner: CliRunner, tmp_path: Path, mocker: Any

@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import Console
 
-from gdr.core.streaming import StreamAggregator, StreamEvent
+from gdr.core.streaming import StreamAggregator, StreamEvent, snapshot_outputs
 from gdr.errors import StreamError
 from gdr.ui.progress import format_elapsed
 
@@ -46,6 +46,7 @@ class LiveStreamResult:
     interaction_id: str | None
     status: str | None
     completed_cleanly: bool
+    streamed_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------------------
@@ -204,18 +205,22 @@ def stream_with_live_ui(
                 if on_disconnect is not None:
                     on_disconnect(exc)
                 renderer.finish()
+                snapshot = agg.snapshot()
                 return LiveStreamResult(
                     interaction_id=agg.interaction_id,
                     status=agg.status,
                     completed_cleanly=False,
+                    streamed_outputs=tuple(snapshot_outputs(snapshot)),
                 )
             agg.feed(event)
             refresh_status()
 
     renderer.finish()
     con.print()  # one blank line after the stream, before the "Done" panel
+    snapshot = agg.snapshot()
     return LiveStreamResult(
         interaction_id=agg.interaction_id,
         status=agg.status,
-        completed_cleanly=agg.snapshot().completed_cleanly,
+        completed_cleanly=snapshot.completed_cleanly,
+        streamed_outputs=tuple(snapshot_outputs(snapshot)),
     )

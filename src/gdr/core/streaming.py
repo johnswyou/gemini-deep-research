@@ -196,15 +196,17 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
 class AggregatedSnapshot:
     """Final state of the aggregator after a stream ends.
 
-    This is *not* the authoritative report shape — callers should re-fetch
-    via ``client.interactions.get(id=...)`` for the canonical outputs. The
-    snapshot is for debugging and for situations where a best-effort view
-    of the streamed content is useful (e.g. CLI --verbose logging).
+    This is not always the authoritative report shape — callers should
+    prefer ``client.interactions.get(id=...)`` outputs when they are
+    present. The current Interactions API may return an empty ``outputs``
+    list from ``.get()`` after a clean stream, though, so the completed
+    stream snapshot is also used as a fallback artifact source.
     """
 
     interaction_id: str | None = None
     status: str | None = None
     text: str = ""
+    annotations: list[Any] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     completed_cleanly: bool = False
@@ -220,6 +222,7 @@ class StreamAggregator:
     ) -> None:
         self._builders: dict[int, _Builder] = {}
         self._text_chunks: list[str] = []
+        self._annotations: list[Any] = []
         self._thoughts: list[str] = []
         self._images: list[str] = []
         self._image_chunks_by_index: dict[int, list[str]] = {}
@@ -243,6 +246,7 @@ class StreamAggregator:
             interaction_id=self._interaction_id,
             status=self._status,
             text="".join(self._text_chunks),
+            annotations=list(self._annotations),
             thoughts=list(self._thoughts),
             images=list(self._images),
             completed_cleanly=self._completed_cleanly,
@@ -346,6 +350,9 @@ class StreamAggregator:
             if data:
                 self._image_chunks_by_index.setdefault(int(index), []).append(data)
                 self._on_event(StreamEvent(kind="image", index=int(index), image_data=data))
+        elif delta_type == "text_annotation_delta":
+            annotations = _get(delta, "annotations", []) or []
+            self._annotations.extend(list(annotations))
 
     def _handle_content_stop(self, event: Any) -> None:
         index = _get(event, "index")
@@ -398,6 +405,19 @@ def _content_type_from_start_event(event: Any) -> str | None:
     if step_type == "model_output":
         return "text"
     return str(step_type) if step_type else None
+
+
+def snapshot_outputs(snapshot: AggregatedSnapshot) -> list[dict[str, Any]]:
+    """Convert a completed stream snapshot into renderable output dicts."""
+    outputs: list[dict[str, Any]] = []
+    if snapshot.text.strip():
+        text_output: dict[str, Any] = {"type": "text", "text": snapshot.text}
+        if snapshot.annotations:
+            text_output["annotations"] = list(snapshot.annotations)
+        outputs.append(text_output)
+    for image in snapshot.images:
+        outputs.append({"type": "image", "data": image, "mime_type": "image/png"})
+    return outputs
 
 
 def _infer_content_type(delta_type: str | None) -> str | None:

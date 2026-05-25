@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import typer
@@ -49,6 +51,13 @@ from gdr.ui.live import stream_with_live_ui
 from gdr.ui.progress import run_with_live_status
 
 _UTC = timezone.utc
+
+
+@dataclass(frozen=True)
+class _CreateOutcome:
+    interaction_id: str | None
+    fallback_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+
 
 # ---------------------------------------------------------------------------
 # Option parsing helpers
@@ -456,7 +465,7 @@ def execute_research(
         raise typer.Exit(code=5) from exc
 
     try:
-        interaction_id = _consume_create_result(
+        create_outcome = _consume_create_result(
             create_result,
             use_stream=use_stream,
             console=console,
@@ -466,6 +475,7 @@ def execute_research(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=exc.exit_code) from exc
 
+    interaction_id = create_outcome.interaction_id
     if not interaction_id:
         console.print("[red]API returned no interaction id; cannot proceed.[/red]")
         raise typer.Exit(code=5)
@@ -492,6 +502,7 @@ def execute_research(
         started_at=started_at,
         console=console,
         query=display_query,
+        fallback_outputs=create_outcome.fallback_outputs,
     )
 
 
@@ -549,6 +560,7 @@ def _finalize_and_render(
     started_at: datetime,
     console: Console,
     query: str,
+    fallback_outputs: tuple[dict[str, Any], ...] = (),
 ) -> None:
     """Fetch authoritative outputs, render artifacts, record, announce.
 
@@ -578,6 +590,7 @@ def _finalize_and_render(
                 query=query,
             )
         )
+        interaction = _with_fallback_outputs(interaction, fallback_outputs)
         finished_at = datetime.now(_UTC)
     except GdrError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -608,21 +621,22 @@ def _consume_create_result(
     use_stream: bool,
     console: Console,
     query: str,
-) -> str | None:
+) -> _CreateOutcome:
     """Extract the interaction id from ``client.interactions.create()``.
 
     For non-streaming calls the SDK returns a partial Interaction object —
     we pull ``.id`` directly. For streaming calls it returns an iterator
     yielding SSE events; we consume it through the live UI, which extracts
-    the id on the ``interaction.start`` event and surfaces disconnects
+    the id on the ``interaction.created`` event and surfaces disconnects
     gracefully by returning the id anyway (the caller polls to finish).
 
     Raises :class:`StreamError` on an explicit error event.
     """
     if not use_stream:
-        return getattr(create_result, "id", None) or (
+        interaction_id = getattr(create_result, "id", None) or (
             create_result.get("id") if isinstance(create_result, dict) else None
         )
+        return _CreateOutcome(interaction_id=interaction_id)
 
     def _on_disconnect(exc: Exception) -> None:
         console.print(
@@ -633,7 +647,35 @@ def _consume_create_result(
     result = stream_with_live_ui(
         create_result, console=console, query=query, on_disconnect=_on_disconnect
     )
-    return result.interaction_id
+    return _CreateOutcome(
+        interaction_id=result.interaction_id,
+        fallback_outputs=result.streamed_outputs if result.completed_cleanly else (),
+    )
+
+
+def _with_fallback_outputs(
+    interaction: Any, fallback_outputs: tuple[dict[str, Any], ...]
+) -> Any:
+    """Attach cleanly streamed outputs when the terminal fetch has none."""
+    if not fallback_outputs or _has_outputs(interaction):
+        return interaction
+
+    outputs = [dict(output) for output in fallback_outputs]
+    if isinstance(interaction, dict):
+        return {**interaction, "outputs": outputs}
+    return SimpleNamespace(
+        id=getattr(interaction, "id", None),
+        status=getattr(interaction, "status", None),
+        outputs=outputs,
+        usage=getattr(interaction, "usage", None),
+    )
+
+
+def _has_outputs(interaction: Any) -> bool:
+    raw = interaction.get("outputs") if isinstance(interaction, dict) else getattr(
+        interaction, "outputs", None
+    )
+    return bool(raw)
 
 
 def _print_dry_run(console: Console, kwargs: dict[str, Any]) -> None:
