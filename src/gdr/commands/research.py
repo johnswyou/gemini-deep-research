@@ -653,9 +653,7 @@ def _consume_create_result(
     )
 
 
-def _with_fallback_outputs(
-    interaction: Any, fallback_outputs: tuple[dict[str, Any], ...]
-) -> Any:
+def _with_fallback_outputs(interaction: Any, fallback_outputs: tuple[dict[str, Any], ...]) -> Any:
     """Attach cleanly streamed outputs when the terminal fetch has none."""
     if not fallback_outputs or _has_outputs(interaction):
         return interaction
@@ -672,8 +670,10 @@ def _with_fallback_outputs(
 
 
 def _has_outputs(interaction: Any) -> bool:
-    raw = interaction.get("outputs") if isinstance(interaction, dict) else getattr(
-        interaction, "outputs", None
+    raw = (
+        interaction.get("outputs")
+        if isinstance(interaction, dict)
+        else getattr(interaction, "outputs", None)
     )
     return bool(raw)
 
