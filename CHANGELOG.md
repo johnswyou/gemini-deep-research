@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-24
+
+### Fixed
+
+- Updated live streaming to parse the current Gemini Interactions API
+  event schema (`interaction.created`, `interaction.status_update`,
+  `step.start`, `step.delta`, `step.stop`, and
+  `interaction.completed`) while retaining compatibility with the
+  previous `interaction.start` / `content.*` event names.
+- Documented the current streaming schema and the `--no-stream`
+  polling fallback for diagnosing streaming transport or schema issues.
+
 ## [0.1.0] - 2026-04-23
 
 First public release. Ships the full CLI surface for driving Google's
@@ -46,5 +58,6 @@ Deep Research / Deep Research Max via the Gemini Interactions API.
   trademarks of Google LLC, used nominatively throughout.
 - 348 unit tests, 93% line coverage, Ruff + Mypy strict clean.
 
-[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/johnswyou/gemini-deep-research/releases/tag/v0.1.0

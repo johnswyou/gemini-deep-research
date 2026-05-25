@@ -1,0 +1,11 @@
+{"event_type": "interaction.created", "interaction": {"id": "int-current-001", "status": "in_progress", "object": "interaction", "agent": "deep-research-preview-04-2026"}, "event_id": "evt-001"}
+{"event_type": "interaction.status_update", "interaction_id": "int-current-001", "status": "in_progress", "event_id": "evt-002"}
+{"event_type": "step.start", "index": 0, "step": {"type": "thought"}, "event_id": "evt-003"}
+{"event_type": "step.delta", "index": 0, "delta": {"type": "thought_signature", "signature": "opaque-signature"}, "event_id": "evt-004"}
+{"event_type": "step.delta", "index": 0, "delta": {"type": "thought_summary", "content": {"type": "text", "text": "Reviewing current sources."}}, "event_id": "evt-005"}
+{"event_type": "step.stop", "index": 0, "event_id": "evt-006"}
+{"event_type": "step.start", "index": 1, "step": {"type": "model_output"}, "event_id": "evt-007"}
+{"event_type": "step.delta", "index": 1, "delta": {"type": "text", "text": "# Current Report\n\n"}, "event_id": "evt-008"}
+{"event_type": "step.delta", "index": 1, "delta": {"type": "text", "text": "The current API uses step events."}, "event_id": "evt-009"}
+{"event_type": "step.stop", "index": 1, "event_id": "evt-010"}
+{"event_type": "interaction.completed", "interaction": {"id": "int-current-001", "status": "completed", "usage": {"total_tokens": 100}}, "event_id": "evt-011"}

@@ -2,16 +2,22 @@
 
 ## Event model
 
-Deep Research streams six event types:
+Deep Research streams these event types:
 
 | Event type             | Description                                     |
 | ---------------------- | ----------------------------------------------- |
-| `interaction.start`    | First event; carries the new interaction id    |
-| `content.start`        | New output block opens at ``index`` with type  |
-| `content.delta`        | Incremental update at ``index`` (see below)    |
-| `content.stop`         | Output block at ``index`` is finalized         |
-| `interaction.complete` | Terminal; ``outputs`` is documented as None   |
+| `interaction.created`  | First event; carries the new interaction id    |
+| `interaction.status_update` | Interaction-level status update           |
+| `step.start`           | New execution step opens at ``index``          |
+| `step.delta`           | Incremental update at ``index`` (see below)   |
+| `step.stop`            | Execution step at ``index`` is finalized      |
+| `interaction.completed`| Terminal; final outputs should be re-fetched  |
 | `error`                | Unrecoverable stream error — abort             |
+
+Older SDK/docs builds used ``interaction.start``, ``content.start``,
+``content.delta``, ``content.stop``, and ``interaction.complete``. The
+aggregator accepts both schemas so saved fixtures and older mocked tests
+remain useful, but the current Interactions API schema is the primary path.
 
 Delta types observed for Deep Research:
 
@@ -30,7 +36,7 @@ to emissions for live rendering; the research command uses the aggregator's
 final state for logging/diagnostics only.
 
 **The final report is never reconstructed from the stream.** Per the docs,
-``interaction.complete`` during streaming has ``outputs=None``, so the
+``interaction.completed`` during streaming omits full outputs, so the
 command always re-fetches via ``client.interactions.get(id=...)`` after the
 stream ends (whether cleanly or by disconnect). Partial delta buffers are
 discarded on disconnect. This is the contract the plan committed to.
@@ -62,6 +68,7 @@ class StreamEvent:
     ``kind`` values:
 
     * ``"start"``          — interaction has a new id; ``interaction_id`` set
+    * ``"status"``         — interaction status changed
     * ``"content_start"``  — new output block opened; ``index``, ``content_type``
     * ``"text_delta"``     — ``text`` chunk appended to output at ``index``
     * ``"thought"``        — a finalized thought summary (``text``)
@@ -128,7 +135,7 @@ class _ImageBuilder:
 
 @dataclass
 class _ThoughtBuilder:
-    """Container for thought-summary deltas on a content.start index.
+    """Container for thought-summary deltas on a step/content index.
 
     Thoughts are almost always whole-message deltas, but we accept multiple
     chunks defensively and concatenate.
@@ -215,6 +222,7 @@ class StreamAggregator:
         self._text_chunks: list[str] = []
         self._thoughts: list[str] = []
         self._images: list[str] = []
+        self._image_chunks_by_index: dict[int, list[str]] = {}
         self._interaction_id: str | None = None
         self._status: str | None = None
         self._completed_cleanly = False
@@ -250,15 +258,17 @@ class StreamAggregator:
         """
         event_type = _get(event, "event_type")
 
-        if event_type == "interaction.start":
+        if event_type in ("interaction.created", "interaction.start"):
             self._handle_start(event)
-        elif event_type == "content.start":
+        elif event_type == "interaction.status_update":
+            self._handle_status_update(event)
+        elif event_type in ("step.start", "content.start"):
             self._handle_content_start(event)
-        elif event_type == "content.delta":
+        elif event_type in ("step.delta", "content.delta"):
             self._handle_content_delta(event)
-        elif event_type == "content.stop":
+        elif event_type in ("step.stop", "content.stop"):
             self._handle_content_stop(event)
-        elif event_type == "interaction.complete":
+        elif event_type in ("interaction.completed", "interaction.complete"):
             self._handle_complete(event)
         elif event_type == "error":
             self._handle_error(event)
@@ -279,12 +289,22 @@ class StreamAggregator:
             StreamEvent(kind="start", interaction_id=self._interaction_id, status=self._status)
         )
 
+    def _handle_status_update(self, event: Any) -> None:
+        interaction_id = _get(event, "interaction_id")
+        status = _get(event, "status")
+        if interaction_id and self._interaction_id is None:
+            self._interaction_id = str(interaction_id)
+        if status:
+            self._status = str(status)
+        self._on_event(
+            StreamEvent(kind="status", interaction_id=self._interaction_id, status=self._status)
+        )
+
     def _handle_content_start(self, event: Any) -> None:
         index = _get(event, "index")
         if index is None:
             return
-        content = _get(event, "content")
-        content_type = _get(content, "type")
+        content_type = _content_type_from_start_event(event)
         self._builders[int(index)] = _make_builder(int(index), content_type)
         self._on_event(
             StreamEvent(kind="content_start", index=int(index), content_type=content_type)
@@ -297,8 +317,8 @@ class StreamAggregator:
         delta = _get(event, "delta")
         delta_type = _get(delta, "type")
         builder = self._builders.get(int(index))
-        # Out-of-order safety: if we never saw content.start, invent a
-        # builder based on the delta type. Most APIs emit content.start,
+        # Out-of-order safety: if we never saw step/content start, invent a
+        # builder based on the delta type. Most APIs emit a start event,
         # but we never want to silently drop real data.
         if builder is None:
             builder = _make_builder(int(index), _infer_content_type(delta_type))
@@ -311,7 +331,7 @@ class StreamAggregator:
             if chunk:
                 self._text_chunks.append(chunk)
                 self._on_event(StreamEvent(kind="text_delta", index=int(index), text=chunk))
-        elif delta_type == "thought_summary":
+        elif delta_type in ("thought", "thought_summary"):
             # The API emits thought summaries as whole messages; finalize
             # eagerly so the UI can render one per event.
             content = _get(delta, "content", None)
@@ -323,9 +343,8 @@ class StreamAggregator:
                 self._on_event(StreamEvent(kind="thought", index=int(index), text=text))
         elif delta_type == "image":
             data = _get(delta, "data", "") or ""
-            if isinstance(builder, _ImageBuilder):
-                builder.add(delta)
             if data:
+                self._image_chunks_by_index.setdefault(int(index), []).append(data)
                 self._on_event(StreamEvent(kind="image", index=int(index), image_data=data))
 
     def _handle_content_stop(self, event: Any) -> None:
@@ -336,13 +355,19 @@ class StreamAggregator:
         if builder is None:
             return
         final = builder.finalize()
-        if isinstance(builder, _ImageBuilder) and final:
+        image_chunks = self._image_chunks_by_index.pop(int(index), [])
+        if image_chunks:
+            self._images.append("".join(image_chunks))
+        elif isinstance(builder, _ImageBuilder) and final:
             self._images.append(final)
         self._on_event(StreamEvent(kind="content_stop", index=int(index)))
 
     def _handle_complete(self, event: Any) -> None:
         interaction = _get(event, "interaction")
         if interaction is not None:
+            interaction_id = _get(interaction, "id")
+            if interaction_id and self._interaction_id is None:
+                self._interaction_id = str(interaction_id)
             status = _get(interaction, "status")
             if status:
                 self._status = status
@@ -362,10 +387,23 @@ class StreamAggregator:
         raise StreamError(f"Stream error {code}: {message}".rstrip(": "))
 
 
+def _content_type_from_start_event(event: Any) -> str | None:
+    content = _get(event, "content")
+    if content is not None:
+        content_type = _get(content, "type")
+        return str(content_type) if content_type else None
+
+    step = _get(event, "step")
+    step_type = _get(step, "type")
+    if step_type == "model_output":
+        return "text"
+    return str(step_type) if step_type else None
+
+
 def _infer_content_type(delta_type: str | None) -> str | None:
     if delta_type == "image":
         return "image"
-    if delta_type == "thought_summary":
+    if delta_type in ("thought", "thought_summary", "thought_signature"):
         return "thought"
     if delta_type == "text":
         return "text"

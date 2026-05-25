@@ -34,11 +34,11 @@ from gdr.ui.progress import format_elapsed
 class LiveStreamResult:
     """Summary returned to the command after the stream ends.
 
-    ``interaction_id`` is the authoritative id captured on ``interaction.start``;
+    ``interaction_id`` is the authoritative id captured on ``interaction.created``;
     callers use it to re-fetch the canonical outputs via
     ``client.interactions.get(id=...)``.
 
-    ``completed_cleanly`` is ``True`` only when an ``interaction.complete``
+    ``completed_cleanly`` is ``True`` only when an ``interaction.completed``
     event arrived. A disconnect that kills the iterator leaves it ``False``
     and the caller should fall through to polling.
     """
@@ -101,6 +101,9 @@ class LiveRenderer:
         if event.kind == "start":
             self._interaction_id = event.interaction_id
             self._status = event.status or "in_progress"
+        elif event.kind == "status":
+            self._interaction_id = event.interaction_id or self._interaction_id
+            self._status = event.status or self._status
         elif event.kind == "thought":
             self._flush_text()
             self._console.print(f"[dim italic]» {event.text}[/dim italic]")

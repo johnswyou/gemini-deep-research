@@ -151,6 +151,21 @@ class TestStreamWithLiveUI:
         assert result.status == "completed"
         assert result.completed_cleanly is True
 
+    def test_current_schema_returns_clean_completion(self) -> None:
+        con = _capture_console()
+        result = stream_with_live_ui(
+            _event_iter(_fixture_events("current_schema_happy_path.jsonl")),
+            console=con,
+            query="test",
+            clock=FakeClock(),
+        )
+        assert result.interaction_id == "int-current-001"
+        assert result.status == "completed"
+        assert result.completed_cleanly is True
+        output = con.export_text()
+        assert "Reviewing current sources" in output
+        assert "Current Report" in output
+
     def test_error_event_raises_stream_error(self) -> None:
         con = _capture_console()
         with pytest.raises(StreamError):
@@ -166,13 +181,13 @@ class TestStreamWithLiveUI:
 
         def flaky_iter() -> Iterator[dict[str, Any]]:
             yield {
-                "event_type": "interaction.start",
+                "event_type": "interaction.created",
                 "interaction": {"id": "int-flaky-abc", "status": "in_progress"},
             }
             yield {
-                "event_type": "content.start",
+                "event_type": "step.start",
                 "index": 0,
-                "content": {"type": "text"},
+                "step": {"type": "model_output"},
             }
             raise ConnectionError("simulated TCP drop")
 
