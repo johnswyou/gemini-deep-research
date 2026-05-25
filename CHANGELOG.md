@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-25
+
+### Fixed
+
+- Fixed a streaming artifact regression in `v0.1.1` where the final
+  report could print correctly in the terminal but `report.md`,
+  `sources.json`, and `transcript.json` were written empty when the
+  terminal `interactions.get(...)` response returned `outputs=[]`.
+  Cleanly completed streams are now retained as a fallback artifact
+  source when the final fetch has no outputs.
+
 ## [0.1.1] - 2026-05-24
 
 ### Fixed
@@ -58,6 +69,7 @@ Deep Research / Deep Research Max via the Gemini Interactions API.
   trademarks of Google LLC, used nominatively throughout.
 - 348 unit tests, 93% line coverage, Ruff + Mypy strict clean.
 
-[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/johnswyou/gemini-deep-research/releases/tag/v0.1.0
