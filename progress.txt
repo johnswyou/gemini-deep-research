@@ -62,6 +62,29 @@ re-learn them.
   `Any` generically.
 
 ### Domain architecture
+- **`core/normalize.py` is THE response adapter.** All readers of a
+  completed interaction (rendering, planning, status, resume) go
+  through `normalized_outputs()` / `raw_output_items()` — never read
+  `interaction.outputs` directly. It bridges SDK objects, dicts, and
+  the docs' `steps[].content[]` shape, and flattens ThoughtContent's
+  list-of-TextContent `summary`. `get_field()` there is the ONE
+  attr-then-key helper (re-exported as `_common.get_attr_or_key`).
+- **Every Typer command is wrapped in `_common.friendly_errors`.**
+  Uncaught GdrError -> one-line message + documented exit code. New
+  commands MUST add the decorator (below @app.command when using
+  sub-app decorators). Raise NetworkError instead of
+  `typer.Exit(code=5)`.
+- **Records are written twice per run:** in_progress right after the
+  interaction id is known, terminal at the end. JsonlStore.append is
+  last-write-wins per id. Never move `_record_run` back behind
+  write_artifacts only.
+- **Confinement is allocation-time policy:** derived output dirs are
+  confined in `_allocate_output_dir`; explicit `--output` is exempt;
+  `write_artifacts` never confines.
+- **poll_until_complete retries transient errors** (5 consecutive max,
+  capped backoff) and treats `incomplete` as terminal. Don't add
+  retries at call sites.
+
 - **`execute_research()` is the shared execution pipeline.** Both
   `gdr research` (with/without `--plan`) and `gdr plan approve` call it.
   Do NOT duplicate create/poll/render logic. The function accepts
@@ -1478,4 +1501,66 @@ overwritten. Hence the RC-first habit for anything risky.
   - env: expansion is prefix-only, but every doc/template example uses
     "Bearer env:TOKEN" (mid-string) which silently doesn't expand -
     and test_config.py asserts the broken behavior as intended.
+---
+
+## 2026-07-07 - Review remediation (P0/P1 fixes from CODE_REVIEW.md)
+- Fixed, with tests, the review's priority list on the PR #3 branch:
+  1. Response adapter `core/normalize.py` (outputs | steps[].content[] |
+     SDK objects) wired into rendering/planning/status/resume; thought
+     summary list flattening; usage total_input/output_tokens spellings;
+     metadata gains "error" field.
+  2. Record lifecycle: in_progress record at create-time + terminal
+     update; Ctrl+C -> resume hint + exit 130 (stream + poll phases).
+  3. --output contract: explicit override exempt from confinement
+     (was: paid run then unhandled crash); write_artifacts no longer
+     confines; resume unaffected by config.output_dir changes.
+  4. friendly_errors boundary on every command; NetworkError replaces
+     7 magic exit-5 sites; malformed config -> exit 4 one-liner.
+  5. Terminal-status handling: failed->1 / cancelled->2 / incomplete->1
+     with artifacts+record always written; poll retry with backoff
+     (5 consecutive, 30s cap); `incomplete` added to TERMINAL_STATUSES.
+  6. store=True sent explicitly (SDK 1.73 create() accepts it).
+  7. Config features wired: [mcp_servers.*] merged into every run (CLI
+     wins by name), auto_open via typer.launch (TTY-gated), embedded
+     "Bearer env:TOKEN" expansion (word-boundary regex; unset var =
+     ConfigError).
+  8. UX: gdr show via typer.echo (pipe-safe; fixes the red test),
+     ambiguous-prefix message, plan approve --max, plan cancel prints
+     plan id, plan prompt re-prompts on garbage, doctor compares SDK
+     version for real, config get redacts secrets (--reveal opt-out),
+     --file 20MB guard, --url guarantees url_context with narrowed
+     config tools.
+  9. Dead code removed: NetworkError now raised; output_subdir,
+     SecurityPolicy.safe_untrusted field, KNOWN_AGENTS,
+     default_agent_config, _SENTINEL, _loaded, dead ls/show --config
+     flags, platformdirs+httpx deps (uv.lock regenerated), duplicate
+     templates/fingerprints/tty-checks consolidated.
+- Tests: 354 -> 403 (test_normalize.py, test_research_regressions.py,
+  retry/flush/redaction/version/approve-max/resume-record additions);
+  4 old tests updated (they asserted the broken behaviors); ruff +
+  format + mypy strict + pytest all green.
+- Verified end-to-end: malformed config exits 4 cleanly; the
+  --output-outside-root repro now completes and writes artifacts.
+- Files changed: src/gdr/** (19 files), tests (12 files), pyproject,
+  uv.lock, docs/USAGE.md, docs/MCP.md, docs/TROUBLESHOOTING.md,
+  examples/02+05, CHANGELOG.md, progress.txt.
+- **Learnings for future iterations:**
+  - google-genai 1.73.1 introspection: Interaction.outputs IS the field
+    (typed content items); status set includes requires_action and
+    incomplete; create() accepts store=; get() accepts last_event_id +
+    stream (SSE reconnect possible later); Usage uses
+    total_input_tokens/total_output_tokens; ThoughtContent.summary is
+    list[TextContent]. SDK's typed SSE events are the OLD schema
+    (interaction.start/content.*) - keep the dual-schema aggregator.
+  - functools.wraps decorators work fine on Typer commands (typer uses
+    inspect.signature which follows __wrapped__); place them BELOW
+    @app.command(...) so registration sees the wrapper.
+  - Tests that certify broken behavior are the expensive kind of drift:
+    4 of the 4 test failures during remediation were tests asserting
+    the bug (env: mid-string non-expansion, write-time confinement,
+    output_subdir). When fixing a reviewed defect, search tests for its
+    blessing first.
+  - CliRunner + friendly_errors: result.output includes stderr; assert
+    exit codes and message text, and `result.exception is None or
+    SystemExit` to prove no traceback leaked.
 ---

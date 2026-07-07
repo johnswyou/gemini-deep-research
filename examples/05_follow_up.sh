@@ -23,7 +23,7 @@ INTERACTION_ID="${1:-}"
 if [[ -z "$INTERACTION_ID" ]]; then
   # Pull the most recent completed interaction from local history.
   INTERACTION_ID=$(gdr ls --status completed --limit 1 --full-id \
-    | awk 'NR > 2 {print $1; exit}')
+    | awk 'NR > 1 {print $1; exit}')
   if [[ -z "$INTERACTION_ID" ]]; then
     echo "No prior interactions found. Run examples/01_basic.sh first." >&2
     exit 1
