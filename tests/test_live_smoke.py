@@ -7,7 +7,8 @@ seconds, while still proving the production-facing seams the mocked
 suite cannot:
 
 * ``interactions.create()`` accepts our kwargs live (``store=True``,
-  ``background=True``, ``model=``, plain-string input);
+  ``background=False`` — plain models reject background interactions —
+  ``model=``, plain-string input);
 * ``interactions.get()`` polling reaches a terminal status;
 * the response adapter extracts text from whatever shape the live API
   actually returns (the empty-``outputs`` question behind v0.1.2).

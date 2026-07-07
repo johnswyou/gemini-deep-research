@@ -23,6 +23,47 @@ the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`
 Read this section BEFORE editing. Rules discovered the hard way — don't
 re-learn them.
 
+### google-genai 2.x Interactions API (post-May-2026 schema) - LOAD-BEARING
+- **Floor is `google-genai>=2.0.0`.** The Interactions API had a breaking
+  schema change in May 2026; 1.x SDKs emit a wire shape the backend now
+  rejects with a 400 ("upgrade to >= 2.0.0"). `MIN_GENAI_VERSION` and
+  `core/client._require_supported_sdk()` enforce it. Agent names
+  (`deep-research-preview-04-2026` / `-max-`) and the follow-up model
+  (`gemini-3.1-pro-preview`) are still current as of 2026-07.
+- **Responses use `steps[]`, not `outputs`.** A completed `Interaction`
+  has `output_text` + `steps[]` of typed step objects: `ModelOutputStep`
+  (`content: [TextContent|ImageContent]` - THE report body), `ThoughtStep`
+  (`summary`/`signature`, NO `content`), tool steps (`GoogleSearchCallStep`,
+  `FunctionCallStep`, ... - no `content`), and a `user_input` step
+  (`get(id)` returns the full timeline). `normalize.py` extracts body text
+  ONLY from `model_output` steps (`_BODY_STEP_TYPES`) so user_input/tool
+  text never leaks into report.md; legacy `outputs` items (step_type None)
+  stay body for back-compat.
+- **Plain models reject `background=True`** ("Model '...' does not support
+  background interactions"). `build_create_kwargs` sends `background=False`
+  on the `model=` branch (--model follow-ups, smoke); Deep Research agents
+  keep `background=True` + `store=True`.
+- **Citations** are `{type:"url_citation", url, title, start/end_index}`;
+  **usage** is `total_input_tokens`/`total_output_tokens`/`total_tokens`
+  (+ thought/cached/tool). Status Literal gained `budget_exceeded`
+  (terminal) + an `UnrecognizedStr` fallback; `Interaction.created`/
+  `updated` are ISO strings (not datetime).
+- **Types live in `google.genai.interactions`** (Interaction, the `Step`
+  Union + concrete `ModelOutputStep`/`ThoughtStep`/..., TextContent,
+  ImageContent, URLCitation, Usage, DeepResearchAgentConfig). `create()`
+  is `**body` (VAR_KEYWORD) - validate kwargs against
+  `CreateAgentInteractionParam`/`CreateModelInteractionParam` TypedDict
+  keys, NOT the signature. `get(id=...)`/`cancel(id=...)` take positional
+  `id`. `ThoughtContent` was removed (-> `ThoughtSummaryContent`).
+- **streaming.py & rendering.py were forward-written to this schema** (SSE
+  `step.delta`/`interaction.completed`, `url_citation`, `total_*_tokens`),
+  so the migration was mostly a version bump + the background fix + the
+  body-leak tightening.
+- **Testing Ctrl+C:** a process launched with `&` from a non-interactive
+  script inherits `SIGINT=SIG_IGN` (Python keeps an inherited ignore), so
+  SIGINT tests do nothing. Use `set -m` (job control) so the background job
+  gets default SIGINT, then `kill -INT -<pgid>` triggers KeyboardInterrupt.
+
 ### Tooling / lint
 - **Ruff bugbear B008:** Typer's `typer.Option(...)` / `typer.Argument(...)`
   in default values trip B008. Fixed via
@@ -1635,4 +1676,60 @@ overwritten. Hence the RC-first habit for anything risky.
     for env-gated markers; keep the skip reason actionable.
   - zip(strict=False) is required by ruff B905 on py310-compatible
     code even when the length mismatch is handled by padding.
+---
+
+## 2026-07-07 - Migrate to google-genai 2.x Interactions API (live-validated)
+- **Blocker found by live validation (PR #3 handoff Part C).** The first
+  live `create()` returned 400 "The legacy Interactions API schema is no
+  longer supported. Please upgrade ... to version >= 2.0.0" - a May-2026
+  breaking change. The whole 1.73.1 integration was rejected server-side.
+  Root cause: PR #3's adapter (normalize/rendering/streaming) was
+  forward-written to the new schema but could never be live-tested on
+  1.73.1, which physically can't emit the new wire shape.
+- **Migration (10 files, +209/-66):**
+  - `pyproject.toml` `google-genai>=2.0.0` + `uv lock` -> 2.10.0.
+  - `constants.py`: `MIN_GENAI_VERSION` -> 2.0.0; add `budget_exceeded`
+    terminal status.
+  - `core/requests.py`: `model=` branch sends `background=False` (plain
+    models reject background interactions in 2.x).
+  - `core/normalize.py`: report body from `model_output` steps only
+    (`_BODY_STEP_TYPES`) so the full 2.x timeline (user_input, thoughts,
+    tool steps) can't leak into report.md.
+  - `core/rendering.py`: transcript captures the full `steps` timeline.
+  - `core/client.py`: fail fast with an upgrade hint if a <2.0.0 SDK is
+    installed (`_require_supported_sdk`).
+  - `tests/unit/test_sdk_contract.py`: rebuilt against real 2.x types
+    (steps/ModelOutputStep/ThoughtStep; Union status; TypedDict kwargs
+    allowlist) + a timeline-leak test + transcript-steps test; plus a
+    client version-guard test and a smoke-test comment fix.
+  - streaming.py/rendering.py logic UNCHANGED - already 2.x-shaped.
+- **Gates:** ruff, ruff format, mypy strict, pytest all green
+  (436 -> 440 tests).
+- **Live validation (real API; 4 Deep Research runs ~4.3M tokens + 1
+  follow-up):**
+  - C1 smoke: PASS (SDK 2.x clears the schema 400).
+  - C2 polling (--no-stream, the empty-fetch path): complete report.md
+    (406 lines, 87 url_citation sources, status=completed, usage 942k).
+  - C2 streamed (--stream): clean completion, thoughts rendered live,
+    complete artifacts (55 sources, 1018k), no body leakage.
+  - C2 `gdr ls`/`status`: completed + token counts; record-at-create
+    confirmed (normal and on-interrupt).
+  - C2 Ctrl+C -> exit 130 + resume hint; `gdr resume` reattaches +
+    writes artifacts (sibling `_resumed_<ts>` dir on collision).
+  - C3 `--model gemini-3.1-pro-preview` follow-up: PASS (2-sentence
+    report, ~29k tokens, `previous_interaction_id` linkage works).
+  - C4 reconnect: not triggered (streamed run 411s < Google's ~600s
+    stream-drop threshold) - consciously observed, not a failure.
+- **Learnings for future iterations:** (load-bearing facts are in the new
+  "### google-genai 2.x Interactions API" subsection at the TOP.)
+  - Live validation is non-negotiable before release. Mocks and contract
+    tests against the *installed* SDK are necessary but cannot catch a
+    server-side schema change: the 1.73.1 contract tests were all green
+    while every live call 400'd.
+  - When a fix is "forward-written" to a schema the pinned dependency
+    can't emit yet, flag it LOUDLY - it looks done but is unproven until
+    the dependency catches up. Here an entire PR sat in that state.
+  - The 2.x SDK `interactions.create()` is `**body`, so the old
+    "kwargs subset of signature params" contract test silently passes
+    everything; validate against the typed create-params TypedDicts.
 ---

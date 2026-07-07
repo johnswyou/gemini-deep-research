@@ -326,13 +326,14 @@ def build_metadata(
 
 
 def build_transcript(interaction: Any, *, policy: SecurityPolicy) -> dict[str, Any]:
-    """Raw outputs + minimal envelope, with sensitive fields redacted.
+    """Raw timeline + minimal envelope, with sensitive fields redacted.
 
-    Useful for debugging and auditing after the fact. We emit output
-    items in the order the API returned them (including tool call/result
-    content that the report renderer skips) so reconstruction is trivial.
+    Useful for debugging and auditing after the fact. Under the 2.x schema
+    the full ``steps`` timeline is emitted (user input, thoughts, tool
+    call/result steps, and model output) so reconstruction is trivial;
+    legacy ``outputs`` payloads fall back to their content items.
     """
-    outputs = raw_output_items(interaction)
+    outputs = _get(interaction, "steps") or raw_output_items(interaction)
     serialized: list[Any] = []
     for output in outputs:
         if isinstance(output, dict):

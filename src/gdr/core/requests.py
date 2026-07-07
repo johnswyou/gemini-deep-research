@@ -114,14 +114,20 @@ def build_create_kwargs(
 
     kwargs: dict[str, Any] = {
         "input": _serialize_input(ctx),
-        "background": ctx.background,
         # The docs require store=true for Deep Research; send it explicitly
         # rather than relying on the backend default.
         "store": True,
     }
     if ctx.model is not None:
         kwargs["model"] = ctx.model
+        # Plain models do NOT support background interactions under the 2.x
+        # API — `create()` 400s with "Model '...' does not support background
+        # interactions." A `--model` follow-up is a fast synchronous call, so
+        # force background off regardless of ctx.background (which defaults
+        # True for the Deep Research agent path).
+        kwargs["background"] = False
     else:
+        kwargs["background"] = ctx.background
         kwargs["agent"] = ctx.agent
         kwargs["agent_config"] = ctx.agent_config.model_dump()
     if ctx.stream:

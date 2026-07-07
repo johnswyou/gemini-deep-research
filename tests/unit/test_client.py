@@ -66,6 +66,16 @@ def test_gdr_client_errors_when_sdk_lacks_interactions(mocker: MagicMock) -> Non
     assert "Interactions API" in str(excinfo.value)
 
 
+def test_gdr_client_rejects_legacy_sdk_major(mocker: MagicMock) -> None:
+    # A 1.x SDK emits the legacy Interactions schema the backend now 400s.
+    mocker.patch.object(client_module, "sdk_version", return_value="1.73.1")
+    with pytest.raises(ConfigError) as excinfo:
+        GdrClient(api_key="AIzaSy-test-key-1234567890")
+    msg = str(excinfo.value)
+    assert "legacy Interactions" in msg
+    assert "2.0.0" in msg
+
+
 def test_repr_does_not_contain_api_key(mocker: MagicMock) -> None:
     fake_client = MagicMock()
     fake_client.interactions = MagicMock()

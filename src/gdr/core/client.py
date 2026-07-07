@@ -45,6 +45,33 @@ def sdk_version() -> str:
         return "unknown"
 
 
+def _installed_genai_major() -> int | None:
+    """Major version component of the installed google-genai, or None."""
+    raw = sdk_version()
+    if raw == "unknown":
+        return None
+    try:
+        return int(raw.split(".", 1)[0])
+    except ValueError:
+        return None
+
+
+def _require_supported_sdk() -> None:
+    """Fail fast when the installed SDK predates the current Interactions schema.
+
+    A 1.x SDK emits the legacy wire schema, which the Gemini backend now
+    rejects with a 400 ("upgrade to >= 2.0.0"). Surfacing that mid-run is
+    confusing; catch it up front with an actionable upgrade hint instead.
+    """
+    major = _installed_genai_major()
+    if major is not None and major < 2:
+        raise ConfigError(
+            f"Installed google-genai {sdk_version()} speaks the legacy Interactions "
+            f"API schema, which the Gemini backend no longer accepts. Upgrade to "
+            f">= {MIN_GENAI_VERSION}: `uv pip install -U 'google-genai>={MIN_GENAI_VERSION}'`."
+        )
+
+
 def api_key_fingerprint(key: str) -> str:
     """Return a safe-to-print fingerprint of an API key.
 
@@ -73,6 +100,8 @@ class GdrClient:
         # `gdr --help`, `gdr --version`, and config-only commands should not
         # pay the cost of pulling in google.genai and its transitive deps.
         from google import genai  # noqa: PLC0415
+
+        _require_supported_sdk()
 
         try:
             client = genai.Client(api_key=api_key)

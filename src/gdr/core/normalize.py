@@ -38,6 +38,11 @@ from typing import Any
 # Step types whose text content is intermediate reasoning, not report body.
 _THOUGHT_STEP_TYPES = frozenset({"thought", "thought_summary"})
 _THOUGHT_CONTENT_TYPES = frozenset({"thought", "thought_summary"})
+# Step types whose text content IS the report body. Under the 2.x schema a
+# completed interaction's ``steps`` is the full timeline — ``user_input`` and
+# tool call/result steps must NOT bleed into the report, only ``model_output``.
+# Legacy ``outputs`` items arrive with ``step_type is None`` and are always body.
+_BODY_STEP_TYPES = frozenset({"model_output"})
 
 
 def get_field(obj: Any, name: str, default: Any = None) -> Any:
@@ -111,8 +116,17 @@ def normalized_outputs(interaction: Any) -> list[dict[str, Any]]:
     for item, step_type in _iter_raw_items(interaction):
         item_type = get_field(item, "type")
         if item_type == "text":
+            if step_type in _THOUGHT_STEP_TYPES:
+                kind = "thought"
+            elif step_type is None or step_type in _BODY_STEP_TYPES:
+                kind = "text"
+            else:
+                # user_input / tool call/result step text is timeline context,
+                # not report body — never render it. (The full step data is
+                # still preserved for the transcript.)
+                continue
             entry: dict[str, Any] = {
-                "type": "thought" if step_type in _THOUGHT_STEP_TYPES else "text",
+                "type": kind,
                 "text": str(get_field(item, "text", "") or ""),
             }
             annotations = get_field(item, "annotations")
