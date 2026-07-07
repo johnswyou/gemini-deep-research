@@ -105,7 +105,7 @@ headers.Authorization = "Bearer env:FACTSET_TOKEN"
 Deep Research agents can read files and the public web. `gdr` ships with:
 
 - **Redaction** of MCP auth headers and API keys from `transcript.json`.
-- **Path confinement**: all artifacts land under the configured `output_dir`; slug names are sanitized.
+- **Path confinement**: derived artifact directories are confined to the configured `output_dir` and slug names are sanitized (an explicit `--output` is honored verbatim).
 - **Header validation** for MCP servers (no CRLF injection, no reserved names).
 - **`--untrusted-input`** flag that disables `code_execution` and `mcp_server` tools for a run — use when grounding in attacker-controlled files or URLs.
 

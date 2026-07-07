@@ -18,7 +18,7 @@ You'll see a table like:
 ```
 Check                   Status  Detail
 Python version          PASS    Python 3.12.12 (required >= 3.10)
-google-genai installed  PASS    version=1.73.1 (required >= 1.55.0)
+google-genai installed  PASS    version=2.10.0 (required >= 2.0.0)
 config file             WARN    not found at ~/.config/gdr/config.toml
 API key available       PASS    from GEMINI_API_KEY env, fingerprint AIza…YVyE
 Network reachable       PASS    DNS OK for generativelanguage.googleapis.com
@@ -127,7 +127,9 @@ Ctrl+C cleanly disconnects the stream but **does not** cancel the
 interaction. The task continues running upstream. `gdr` prints:
 
 ```
-Task still running. Resume: gdr resume <id>
+Interrupted. The research continues server-side.
+  Check on it:  gdr status <id>
+  Reattach:     gdr resume <id>
 ```
 
 When you're ready:
@@ -137,9 +139,11 @@ gdr resume <interaction-id>
 ```
 
 This polls to completion (or reports the terminal status if it's
-already done) and writes artifacts to a sibling `_resumed_<ts>`
-directory so your original run's output isn't clobbered. Use
-`--force` to overwrite instead.
+already done) and writes artifacts. If the run's directory already
+contains files, resume writes to a sibling `_resumed_<ts>` directory
+instead of clobbering them (the common Ctrl+C case has no artifacts
+yet, so the original directory is used); pass `--force` to overwrite
+in place.
 
 If you want to actually kill the task, `gdr cancel <id>` — but note
 that cancellation also costs the tokens used up to that point.
@@ -260,6 +264,27 @@ Don't lose the backup — `config set` can't restore nested
 
 ---
 
+## `gdr follow-up` fails with HTTP 400 on a completed research run
+
+The Gemini API has been rejecting Deep Research follow-ups whose
+parent is a *completed* research interaction with an opaque
+`400 - There was a problem processing your request.` This is
+server-side behavior, not a gdr bug (the same request 400s against
+the raw SDK). When it happens, gdr prints the alternatives:
+
+```bash
+# Cheap clarification over the same context (plain model, no 400):
+gdr follow-up <id> "Elaborate on section 3" --model gemini-3.1-pro-preview
+
+# Or a fresh research run with the relevant context quoted in the query.
+```
+
+Note that `previous_interaction_id` chaining *does* work for the
+planning flow (`gdr plan refine` / `gdr plan approve`) — the
+rejection is specific to follow-ups on terminal research runs.
+
+---
+
 ## `interactions.cancel` not found on SDK
 
 You're running `gdr cancel` against an older `google-genai` build that
@@ -280,7 +305,7 @@ AttributeError.
 
 If you're hacking on `gdr` itself and writing a test that needs a
 real image file, use the 67-byte inline PNG used in existing tests
-(`tests/unit/test_inputs.py::TINY_PNG_B64`). It's a valid
+(`tests/unit/test_rendering.py::_TINY_PNG_B64`). It's a valid
 1×1-pixel transparent PNG that `mimetypes.guess_type` recognizes.
 
 ---

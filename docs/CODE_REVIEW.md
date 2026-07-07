@@ -1,5 +1,10 @@
 # Deep Code Review — `gdr` (gemini-deep-research)
 
+> **HISTORICAL DOCUMENT.** This review describes the v0.1.2 tree; its
+> P0/P1 findings were remediated in v0.1.3 (see `CHANGELOG.md`) and it
+> is superseded by [`CODE_REVIEW_v0.1.3.md`](CODE_REVIEW_v0.1.3.md).
+> Do not treat the defects below as current.
+
 **Date:** 2026-07-07 · **Tree reviewed:** `9a70b2e` (v0.1.2 + hotfix PRs #1/#2) · **Scope:** full repo — architecture, correctness, code quality, tests, docs, packaging, CI.
 
 **Reference:** [Gemini Deep Research API docs](https://ai.google.dev/gemini-api/docs/deep-research)

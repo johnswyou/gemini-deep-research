@@ -41,7 +41,7 @@ def run(
         None,
         "--status",
         help="Only show interactions with this status "
-        "(completed / failed / cancelled / incomplete / in_progress).",
+        "(completed / failed / cancelled / incomplete / budget_exceeded / in_progress).",
     ),
     since: str | None = typer.Option(
         None,

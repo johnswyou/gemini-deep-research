@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Streamed runs render from the authoritative fetch again.** The
+  streamed-fallback guard keyed on `Interaction.outputs`, which the 2.x
+  SDK removed, so every cleanly streamed run silently rendered
+  `report.md`/`sources.json` from the stream buffer and `transcript.json`
+  lost the `steps` timeline. The guard now asks the response normalizer
+  whether the fetch has report content, and the fallback merges into the
+  fetch instead of rebuilding a minimal object. (This corrects two 0.1.3
+  release-note claims that only held for polling runs.)
+- Thought summaries surface again under the 2.x schema: `ThoughtStep`
+  carries `summary` with no `content`, which the normalizer used to drop
+  — `gdr status` can print its "Thought:" line again.
+- Failure details reach diagnostics: the 2.x `Interaction` has no
+  top-level `error`; step-level errors (`ModelOutputStep.error`) now
+  feed the failure `Detail:` line and `metadata.json`.
+- Streamed runs are recorded in the local store the moment the stream
+  announces the interaction id (previously only after the stream ended),
+  and a mid-stream `error` event prints a reattach hint instead of
+  losing the id. A stream killed by an external `gdr cancel` now exits 2
+  with a clear "cancelled" message instead of a generic stream error.
+- `gdr research --plan` with `--file`/`--url` grounds the plan
+  interaction on those inputs (previously they were parsed, encoded, and
+  silently dropped from both the plan and the execution requests).
+- `--max --plan` shows the Max cost confirmation before creating the
+  plan interaction (previously the whole planning flow bypassed it).
+- `gdr plan refine` gained `--max` so refining a Max plan no longer
+  silently downgrades the chain to the default agent; plan submission
+  failures now exit 5 (network) like the research pipeline.
+- Agent-mode follow-ups that hit the API's HTTP 400 on completed
+  research parents now print the `--model` fallback and are documented
+  in USAGE/TROUBLESHOOTING.
+- `gdr ls` no longer mislabels `--model` follow-up records as the fast
+  agent ("preview"); `gdr status` prints the run duration for finished
+  runs instead of the record's wallclock age; `report.md`'s header
+  timestamp reflects when the research finished, not when it was
+  rendered (`gdr resume`); invalid-key `create()` failures (401/403)
+  exit 4 as auth errors instead of 5; the plaintext-MCP warning is
+  suppressed when untrusted mode already stripped the servers.
+- The local history store ignores unknown record fields, so rows written
+  by other gdr versions keep loading as the schema evolves.
+
+### Changed
+
+- Internal consolidation: one client-construction path, one
+  status-color palette (now covering `incomplete`/`budget_exceeded`),
+  config `thinking_summaries`/`visualization` share the request-side
+  Literal types, and dead surface (`Record.note`, `Store.list_children`)
+  was removed.
+- Docs corrected against the shipped behavior: config MCP servers merge
+  with CLI `--mcp` flags (CLI wins by name), explicit `--output` is
+  exempt from path confinement, the doctor example reflects the 2.x SDK
+  floor, and the v0.1.2 review is marked historical.
+
 ## [0.1.3] - 2026-07-07
 
 ### Changed

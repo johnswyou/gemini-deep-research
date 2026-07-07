@@ -96,9 +96,10 @@ headers.X-Workspace = "production"
 * `allowed_tools` is optional. When set, only the named MCP tools
   become callable; the rest are filtered server-side.
 
-> **Note:** CLI `--mcp` flags currently *replace* rather than merge
-> with TOML-declared servers. If you want to combine CLI overrides
-> with a persistent server, repeat the CLI flag or use config.
+> **Note:** TOML-declared servers are attached to *every* research run
+> and **merge** with CLI `--mcp` flags. On a name collision the CLI
+> flag wins (it is the more explicit intent); config servers are
+> appended in name order so the wire shape stays deterministic.
 
 ---
 
@@ -132,9 +133,12 @@ Example transcript snippet:
 
 ### Path confinement
 
-MCP servers cannot write outside the configured `output_dir`. Every
-artifact path is resolved and checked against the configured root via
-`Path.is_relative_to`. Refused escapes raise `ConfigError`.
+Artifact directories that gdr *derives* (the default
+`<ts>_<slug>_<id6>` layout, whose slug comes from arbitrary query
+text) are resolved and checked against the configured `output_dir`;
+escape attempts raise `ConfigError`. An explicit `--output DIR` is the
+user's own stated intent and is exempt. MCP servers never write to
+your filesystem at all — they run remotely; only gdr writes artifacts.
 
 ### Untrusted input mode
 

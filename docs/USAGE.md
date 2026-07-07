@@ -106,6 +106,13 @@ Plans always run with `thinking_summaries="none"` and
 `visualization="off"` (plans should return fast; streaming UI adds no
 value at this step).
 
+`--file` and `--url` inputs ground the *plan* interaction, and the
+executed research inherits them through `previous_interaction_id` —
+you don't need to re-attach anything at approval time. With
+`--max --plan`, the Max cost confirmation appears before the plan
+interaction is created (the plan itself already runs on the Max
+agent).
+
 ---
 
 ## `gdr plan refine <id> <feedback>`
@@ -113,6 +120,8 @@ value at this step).
 One-shot plan refinement for use across terminal sessions. Creates a
 new plan interaction with `previous_interaction_id=<id>` and
 `collaborative_planning=True`, using your feedback as the input.
+Pass `--max` when the plan was created with the Max agent — like
+`plan approve`, refinement does not remember the original choice.
 
 Prints the new plan and the new plan id. On non-TTY stdout the new id
 is also written to stdout alone on the last line, so scripts can
@@ -127,6 +136,7 @@ gdr plan approve "$new_id"
 
 | Flag | Purpose |
 | --- | --- |
+| `--max` | Refine with Deep Research Max (match how the plan was created). |
 | `--api-key KEY` | Override the API key. |
 | `--config PATH` | Alternate config TOML. |
 
@@ -162,7 +172,7 @@ operation — no API calls.
 | Flag | Purpose |
 | --- | --- |
 | `-n / --limit N` | Maximum rows (most recent first). Default 20. |
-| `--status S` | Filter by status: `completed`, `failed`, `cancelled`, `incomplete`, `in_progress`. |
+| `--status S` | Filter by status: `completed`, `failed`, `cancelled`, `incomplete`, `budget_exceeded`, `in_progress`. |
 | `--since DATE` | Filter by creation time. Accepts relative (`7d`, `24h`, `30m`, `2w`), dates (`YYYY-MM-DD`), and ISO 8601. |
 | `--full-id` | Show full interaction ids instead of truncated. |
 
@@ -203,9 +213,9 @@ gdr show intabcxyz123 --part images            # list image file paths
 ## `gdr status <id>`
 
 One-shot status check on an in-progress or completed interaction.
-Prints current status, elapsed time (when a local record exists),
-token usage, and the last thought summary if the agent is still
-running.
+Prints current status, timing (when a local record exists: elapsed
+wallclock while running, run duration once finished), token usage,
+and the last thought summary if the agent is still running.
 
 Useful for quick visibility after you detached from a streaming run.
 
@@ -275,6 +285,13 @@ Two execution modes:
   model instead: fast and cheap, right for "elaborate on section 3"
   clarifications. Mutually exclusive with `--max`; sends no research
   tools.
+
+> **Known API limitation:** the Gemini API has been rejecting
+> agent-mode follow-ups on *completed* research parents with an
+> opaque HTTP 400 (server-side; reproducible against the raw SDK).
+> The `--model` mode is not affected. When the 400 occurs, gdr
+> prints these alternatives. See
+> [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md#gdr-follow-up-fails-with-http-400-on-a-completed-research-run).
 
 If the parent run executed in untrusted-input mode, the follow-up
 inherits that posture automatically (persisted in the local record);

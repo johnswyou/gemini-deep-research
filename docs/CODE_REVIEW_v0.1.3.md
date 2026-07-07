@@ -1,5 +1,11 @@
 # Deep Code Review — `gdr` v0.1.3
 
+> **Remediation status (2026-07-07):** findings A1–A3, B1–B6, the
+> consolidation batch, and the docs table were fixed in the commits
+> following this review (see `CHANGELOG.md` → Unreleased). Still open:
+> live re-validation of agent-mode follow-up (needs an API key), legacy
+> stream-schema retirement, and the JsonlStore compaction note.
+
 **Date:** 2026-07-07 · **Tree reviewed:** `6618dd2` (v0.1.3, clean) · **Scope:** full repo — architecture, correctness, code quality, tests, docs, packaging, CI.
 
 **References:** [Gemini Deep Research API docs](https://ai.google.dev/gemini-api/docs/deep-research) · installed `google-genai 2.10.0` (introspected directly; all schema claims below were verified against real SDK types, not assumed).
