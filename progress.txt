@@ -1437,3 +1437,45 @@ overwritten. Hence the RC-first habit for anything risky.
     change so you're not reconstructing the release notes from
     `git log` when the time comes.
 ---
+
+## 2026-07-07 - Deep code review (full repo)
+- Produced CODE_REVIEW.md at repo root: full-repo review (architecture,
+  correctness, code quality, tests, docs, packaging, CI) against the
+  current Deep Research API docs. No source changes - review only.
+- Verified gates: ruff lint + format clean, mypy strict clean, BUT the
+  test suite is NOT green on a clean checkout: 353 passed, 1 failed
+  (test_show_command.py::test_images_part_lists_files - Rich wraps the
+  long tmp path at width 80 and splits "image_001.png" mid-name).
+- Empirically reproduced the top finding: `gdr research --output <dir>`
+  with dir outside config output_dir completes the (paid) run, then
+  dies on an UNHANDLED ConfigError from write_artifacts' policy.confine
+  (exit 1, no artifacts, no record, unresumable).
+- Files changed: CODE_REVIEW.md (new), progress.txt (this entry).
+- **Learnings for future iterations:**
+  - The v0.1.2 hotfix premise ("final fetch is empty") implies ALL
+    non-stream readers of `.get().outputs` are still broken: rendering
+    (--no-stream + every non-TTY run), resume, plan text extraction,
+    status last-thought, and sources.json. Fix belongs in ONE response
+    adapter, not per-caller fallbacks.
+  - Records are appended only after successful render
+    (research.py:_finalize_and_render), so resume/ls/timeout-hint can
+    never serve interrupted/failed/timed-out runs. Append an
+    in_progress record right after create() returns an id -
+    JsonlStore.append is already last-write-wins per id.
+  - There is NO outer GdrError->exit-code boundary despite errors.py
+    claiming one; load_config raises tracebacks in most commands, and
+    exit code 5 is a magic number at 7 call sites (NetworkError is
+    never raised).
+  - `_resolve_agent` has a dead if-branch (both arms return
+    config.default_agent) and no test asserts --max selects AGENT_MAX
+    on the wire - one typo away from silently shipping the wrong agent.
+  - Config `[mcp_servers.*]` tables are parsed but never merged into
+    any request; `auto_open` is threaded into RunContext but never
+    read. Both are documented features.
+  - Machine-readable output MUST use typer.echo, not console.print -
+    `gdr show` (report text + image paths) violates this and corrupts
+    piped output at width 80; this is what broke the test above.
+  - env: expansion is prefix-only, but every doc/template example uses
+    "Bearer env:TOKEN" (mid-string) which silently doesn't expand -
+    and test_config.py asserts the broken behavior as intended.
+---
