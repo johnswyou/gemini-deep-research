@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-07
+
+### Changed
+
+- **Requires `google-genai >= 2.0.0`.** The Gemini Interactions API removed
+  its legacy request/response schema in May 2026; 1.x SDKs are rejected by
+  the backend with a 400 ("The legacy Interactions API schema is no longer
+  supported"). gdr now targets the 2.x schema — responses as a `steps[]`
+  timeline, `url_citation` annotations, and the renamed SSE events — and
+  fails fast with an upgrade hint when an older SDK is installed. `--model`
+  follow-ups send `background=false` (2.x plain-model interactions reject
+  background execution); Deep Research agent runs are unchanged. The report
+  body is taken only from `model_output` steps, so a 2.x `get(id)`
+  full-timeline response (user input, thoughts, tool calls) cannot leak
+  into `report.md`. Validated live against the real API (research in both
+  polling and streaming modes, `--model` follow-up, Ctrl+C → resume).
+
 ### Added
 
 - `gdr follow-up --model <id>` answers follow-ups with a plain Gemini
@@ -25,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SDK contract tests: gdr's `create()`/`get()` kwargs are validated
   against the installed google-genai signatures, and the response
   adapter against real SDK response types (`Interaction`,
-  `TextContent`, `ThoughtContent`, `Usage`) — the class of drift
+  `ModelOutputStep`, `TextContent`, `URLCitation`, `Usage`) — the class of drift
   behind v0.1.1/v0.1.2 now fails in CI instead of in production.
 - An opt-in live smoke test (`RUN_LIVE_TESTS=1 pytest -m live`) proves
   the create/poll/normalize pipeline against the real API using a
@@ -169,7 +186,8 @@ Deep Research / Deep Research Max via the Gemini Interactions API.
   trademarks of Google LLC, used nominatively throughout.
 - 348 unit tests, 93% line coverage, Ruff + Mypy strict clean.
 
-[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/johnswyou/gemini-deep-research/releases/tag/v0.1.0
