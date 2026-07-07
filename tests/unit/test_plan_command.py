@@ -316,3 +316,35 @@ class TestApproveMax:
         assert result.exit_code == 0
         assert fake_interactions.create.call_args.kwargs["agent"] == AGENT_MAX
         assert fake_interactions.create.call_args.kwargs["previous_interaction_id"] == "plan-123"
+
+
+class TestRefineMax:
+    def test_refine_max_uses_the_max_agent(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # Refining a Max-created plan must not silently downgrade the
+        # chain to the default agent — mirror `plan approve --max`.
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(
+            mocker,
+            create_returns=SimpleNamespace(id="plan-max-001", status="in_progress"),
+            get_returns=_fake_plan_interaction(id_="plan-max-001", text="Refined max plan."),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "plan",
+                "refine",
+                "plan-old-000",
+                "Go deeper on pricing.",
+                "--max",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert fake.create.call_args.kwargs["agent"] == AGENT_MAX

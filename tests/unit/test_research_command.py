@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gdr.cli import app
+from gdr.constants import AGENT_MAX
 
 # 1x1 transparent PNG, for --file round-trip tests.
 _TINY_PNG_B64 = (
@@ -1105,3 +1106,140 @@ class TestUntrustedInputFlag:
         call_kwargs = fake.create.call_args.kwargs
         tool_types = [t["type"] for t in call_kwargs["tools"]]
         assert "code_execution" not in tool_types
+
+
+class TestPlanCarriesInputs:
+    """`--plan` with `--file`/`--url` must ground the PLAN interaction on
+    those inputs. Previously the parts were parsed, base64-encoded, and
+    then silently dropped: the plan request was text-only and the
+    execution request's input was replaced by the approval sentinel."""
+
+    def test_plan_request_includes_file_part(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        png = tmp_path / "grounding.png"
+        png.write_bytes(_TINY_PNG_BYTES)
+        sdk = _PlanAndRunSDK(
+            plan_ids=["planwithfile"], plan_texts=["Plan."], final_id="runwithfile"
+        )
+        _install_plan_sdk(mocker, sdk)
+        mocker.patch("gdr.core.planning.typer.prompt", return_value="A")  # approve
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Analyze the attached chart",
+                "--plan",
+                "--no-stream",
+                "--file",
+                str(png),
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        plan_call = sdk.create_calls[0]
+        assert isinstance(plan_call["input"], list), "plan input must be a parts list"
+        assert plan_call["input"][0] == {"type": "text", "text": "Analyze the attached chart"}
+        image_parts = [p for p in plan_call["input"] if p.get("type") == "image"]
+        assert image_parts, "the --file part never reached the plan request"
+        assert image_parts[0]["data"] == _TINY_PNG_B64
+
+        # The approval turn stays text-only: the parts already live in the
+        # plan interaction's context and chain via previous_interaction_id.
+        exec_call = sdk.create_calls[1]
+        assert exec_call["input"] == "Plan looks good!"
+        assert exec_call["previous_interaction_id"] == "planwithfile"
+
+    def test_plan_dry_run_previews_parts(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        png = tmp_path / "grounding.png"
+        png.write_bytes(_TINY_PNG_BYTES)
+        mock_client_ctor = mocker.patch("google.genai.Client")
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Analyze the attached chart",
+                "--plan",
+                "--dry-run",
+                "--file",
+                str(png),
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        mock_client_ctor.assert_not_called()
+        assert '"image"' in result.output
+
+
+class TestMaxPlanConfirmation:
+    """`--max --plan` must show the Max cost gate BEFORE the plan
+    interaction is created — the plan itself already runs on the Max
+    agent, and the approval step later skips the gate (by then
+    previous_interaction_id is set)."""
+
+    def test_declining_max_confirm_aborts_before_any_plan_call(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        sdk = _PlanAndRunSDK(plan_ids=["planmax1"], plan_texts=["Plan."], final_id="runmax1")
+        _install_plan_sdk(mocker, sdk)
+        mocker.patch("gdr.commands.research.typer.confirm", return_value=False)
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Expensive question",
+                "--plan",
+                "--max",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Aborted" in result.output
+        assert sdk.create_calls == []  # nothing was created, nothing billed
+
+    def test_accepting_max_confirm_plans_with_the_max_agent(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        sdk = _PlanAndRunSDK(plan_ids=["planmax2"], plan_texts=["Plan."], final_id="runmax2")
+        _install_plan_sdk(mocker, sdk)
+        mocker.patch("gdr.commands.research.typer.confirm", return_value=True)
+        mocker.patch("gdr.core.planning.typer.prompt", return_value="A")  # approve
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "Expensive question",
+                "--plan",
+                "--max",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(sdk.create_calls) == 2
+        assert sdk.create_calls[0]["agent"] == AGENT_MAX
+        assert sdk.create_calls[1]["agent"] == AGENT_MAX

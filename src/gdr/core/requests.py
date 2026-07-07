@@ -60,17 +60,23 @@ def _serialize_input_part(part: InputPart) -> dict[str, Any]:
     return part.model_dump(exclude_none=True)
 
 
-def _serialize_input(ctx: RunContext) -> str | list[dict[str, Any]]:
-    """Return either the plain query string or a parts list.
+def serialize_input(text: str, input_parts: tuple[InputPart, ...]) -> str | list[dict[str, Any]]:
+    """Return either the plain text string or a parts list.
 
     The API accepts either form. We use the plain string when there are no
     extra parts, so requests stay readable in `--dry-run` and snapshot tests.
+    Shared with the planning flow so plan interactions ground on the same
+    multimodal inputs as direct research runs.
     """
-    if not ctx.input_parts:
-        return ctx.query
-    parts: list[dict[str, Any]] = [{"type": "text", "text": ctx.query}]
-    parts.extend(_serialize_input_part(p) for p in ctx.input_parts)
+    if not input_parts:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    parts.extend(_serialize_input_part(p) for p in input_parts)
     return parts
+
+
+def _serialize_input(ctx: RunContext) -> str | list[dict[str, Any]]:
+    return serialize_input(ctx.query, ctx.input_parts)
 
 
 def build_tools(ctx: RunContext, policy: SecurityPolicy) -> tuple[list[dict[str, Any]], list[str]]:

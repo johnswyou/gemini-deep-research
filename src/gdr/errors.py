@@ -58,3 +58,7 @@ class StreamError(GdrError):
     """An error event arrived over the streaming connection."""
 
     exit_code = 1
+    # Set by the aggregator when the stream had already announced the
+    # interaction id, so callers can print a reattach hint even though
+    # the stream died before returning a result.
+    interaction_id: str | None = None

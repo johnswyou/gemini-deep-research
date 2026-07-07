@@ -343,3 +343,27 @@ class TestStreamReconnect:
 
         assert result.completed_cleanly is True
         assert result.total_tokens == 777
+
+
+class TestOnStartCallback:
+    def test_on_start_fires_once_with_the_interaction_id(self) -> None:
+        events = [
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "int-cb-1", "status": "in_progress"},
+            },
+            # A reconnect can replay the created event — the callback must
+            # still fire exactly once.
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "int-cb-1", "status": "in_progress"},
+            },
+            {
+                "event_type": "interaction.completed",
+                "interaction": {"id": "int-cb-1", "status": "completed"},
+            },
+        ]
+        seen: list[str] = []
+        result = stream_with_live_ui(iter(events), console=_capture_console(), on_start=seen.append)
+        assert seen == ["int-cb-1"]
+        assert result.interaction_id == "int-cb-1"

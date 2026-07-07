@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from gdr.core.models import MediaPart
 from gdr.core.planning import (
     PlanDecision,
     PlanRequest,
@@ -54,6 +55,18 @@ class TestBuildPlanKwargs:
         # Plans never stream in our flow.
         kw = build_plan_kwargs(PlanRequest(input_text="x", agent="a"))
         assert "stream" not in kw
+
+    def test_input_parts_serialize_to_a_parts_list(self) -> None:
+        req = PlanRequest(
+            input_text="Ground on the attached image",
+            agent="a",
+            input_parts=(MediaPart(type="image", data="QUJD", mime_type="image/png"),),
+        )
+        kw = build_plan_kwargs(req)
+        assert kw["input"][0] == {"type": "text", "text": "Ground on the attached image"}
+        assert kw["input"][1]["type"] == "image"
+        assert kw["input"][1]["data"] == "QUJD"
+        assert kw["input"][1]["mime_type"] == "image/png"
 
 
 # ---------------------------------------------------------------------------

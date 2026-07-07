@@ -27,6 +27,7 @@ from rich.console import Console
 from gdr.commands._common import friendly_errors, stdout_is_tty
 from gdr.commands.research import execute_research
 from gdr.config import load_config
+from gdr.constants import AGENT_MAX
 from gdr.core.client import GdrClient
 from gdr.core.planning import (
     PlanRequest,
@@ -81,6 +82,12 @@ def refine_cmd(
     feedback: str = typer.Argument(
         ..., help="Your feedback. E.g. 'Focus on 2024 data and drop methodology.'"
     ),
+    use_max: bool = typer.Option(
+        False,
+        "--max",
+        help="Refine with Deep Research Max. Match this to how the plan was "
+        "created — refinement does not remember the original --max choice.",
+    ),
     api_key: str | None = typer.Option(
         None, "--api-key", help="Override the API key for this run only."
     ),
@@ -94,7 +101,7 @@ def refine_cmd(
 
     request = PlanRequest(
         input_text=feedback,
-        agent=default_agent,
+        agent=AGENT_MAX if use_max else default_agent,
         previous_interaction_id=plan_id,
     )
     try:

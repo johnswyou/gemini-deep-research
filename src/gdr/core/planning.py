@@ -34,8 +34,9 @@ from rich.console import Console
 from rich.panel import Panel
 
 from gdr.core.client import GdrClient
-from gdr.core.models import AgentConfig
+from gdr.core.models import AgentConfig, InputPart
 from gdr.core.normalize import interaction_id_of, normalized_outputs
+from gdr.core.requests import serialize_input
 from gdr.errors import GdrError
 from gdr.ui.progress import run_with_live_status
 
@@ -54,11 +55,17 @@ class PlanDecision(str, Enum):
 
 @dataclass(frozen=True)
 class PlanRequest:
-    """Everything required to create one plan interaction."""
+    """Everything required to create one plan interaction.
+
+    ``input_parts`` carries the run's ``--file``/``--url`` inputs so the
+    plan grounds on them; refinement requests leave it empty because the
+    parts already live in the chained interaction context.
+    """
 
     input_text: str
     agent: str
     previous_interaction_id: str | None = None
+    input_parts: tuple[InputPart, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +83,7 @@ def build_plan_kwargs(req: PlanRequest) -> dict[str, Any]:
     """
     kwargs: dict[str, Any] = {
         "agent": req.agent,
-        "input": req.input_text,
+        "input": serialize_input(req.input_text, req.input_parts),
         "background": True,
         "store": True,
         "agent_config": AgentConfig(
@@ -201,14 +208,17 @@ def interactive_plan_loop(
     initial_query: str,
     agent: str,
     console: Console,
+    input_parts: tuple[InputPart, ...] = (),
 ) -> str | None:
     """Run the approve / refine / cancel loop until we have a final plan.
 
     Returns the id of the approved plan interaction, or ``None`` if the
     user cancelled. The returned id is what the caller feeds back as
-    ``previous_interaction_id`` for the execution phase.
+    ``previous_interaction_id`` for the execution phase. ``input_parts``
+    ground the *initial* plan request; refinement turns are text-only
+    because the parts chain through ``previous_interaction_id``.
     """
-    request = PlanRequest(input_text=initial_query, agent=agent)
+    request = PlanRequest(input_text=initial_query, agent=agent, input_parts=input_parts)
 
     while True:
         plan_interaction = run_plan_phase(client, req=request, console=console)

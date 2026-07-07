@@ -27,9 +27,10 @@ from typing import Any, get_args
 
 import pytest
 
+from gdr.commands.research import _with_fallback_outputs
 from gdr.constants import STATUS_IN_PROGRESS, TERMINAL_STATUSES
 from gdr.core.models import AgentConfig, FileSearchSpec, McpSpec, RunContext, TextPart
-from gdr.core.normalize import normalized_outputs
+from gdr.core.normalize import error_of, normalized_outputs
 from gdr.core.rendering import (
     _usage_dict,
     build_report_text,
@@ -253,3 +254,140 @@ class TestTimelineDoesNotLeakIntoReport:
     def test_thought_step_text_is_typed_thought(self) -> None:
         outputs = normalized_outputs(self._timeline())
         assert {"type": "thought", "text": "internal reasoning"} in outputs
+
+
+class TestRealThoughtAndErrorSteps:
+    """The real 2.x step models: ``ThoughtStep`` carries ``summary`` (no
+    ``content``), and failure details live on ``ModelOutputStep.error``
+    (the 2.x ``Interaction`` has no top-level ``error`` field)."""
+
+    def test_thought_step_summary_surfaces_as_thought(self) -> None:
+        im = genai_interactions
+        interaction = im.Interaction(
+            id="int-thought-1",
+            created="2026-07-07T00:00:00Z",
+            updated="2026-07-07T00:01:00Z",
+            status="in_progress",
+            steps=[
+                im.ThoughtStep(
+                    type="thought",
+                    summary=[im.TextContent(type="text", text="Reading sources on X")],
+                )
+            ],
+        )
+        outputs = normalized_outputs(interaction)
+        assert {"type": "thought", "text": "Reading sources on X"} in outputs
+
+    def test_step_level_error_reaches_error_of(self) -> None:
+        im = genai_interactions
+        interaction = im.Interaction.model_validate(
+            {
+                "id": "int-fail-1",
+                "created": "2026-07-07T00:00:00Z",
+                "updated": "2026-07-07T00:01:00Z",
+                "status": "failed",
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [],
+                        "error": {"code": "quota_exceeded", "message": "You ran out"},
+                    }
+                ],
+            }
+        )
+        assert error_of(interaction) == "quota_exceeded: You ran out"
+
+
+class TestStreamedFallbackPrefersAuthoritativeFetch:
+    """`_with_fallback_outputs` must keep a fetch that has report content.
+
+    The 2.x ``Interaction`` has no ``outputs`` field, so the guard cannot
+    key on it: a terminal fetch whose ``steps`` carry the report body is
+    authoritative, and the streamed buffer is only the fallback for a
+    fetch with no renderable report content (the v0.1.2 empty-fetch case).
+    """
+
+    _STREAM_BUFFER = ({"type": "text", "text": "STREAM BUFFER TEXT"},)
+
+    def _fetch_with_report(self) -> Any:
+        im = genai_interactions
+        return im.Interaction.model_validate(
+            {
+                "id": "int-stream-1",
+                "created": "2026-07-07T00:00:00Z",
+                "updated": "2026-07-07T00:10:00Z",
+                "status": "completed",
+                "steps": [
+                    {
+                        "type": "google_search_call",
+                        "id": "call-1",
+                        "arguments": {"queries": ["example"]},
+                    },
+                    {
+                        "type": "model_output",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "AUTHORITATIVE FETCH BODY",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.com/a",
+                                        "title": "Example A",
+                                    },
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.com/b",
+                                        "title": "Example B",
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+
+    def test_fetch_with_report_content_wins_over_stream_buffer(self) -> None:
+        merged = _with_fallback_outputs(self._fetch_with_report(), self._STREAM_BUFFER)
+        assert build_report_text(merged) == "AUTHORITATIVE FETCH BODY"
+        assert len(collect_sources(merged)) == 2
+
+    def test_transcript_keeps_timeline_on_cleanly_streamed_runs(self, tmp_path: Path) -> None:
+        merged = _with_fallback_outputs(self._fetch_with_report(), self._STREAM_BUFFER)
+        transcript = build_transcript(merged, policy=SecurityPolicy(output_root=tmp_path))
+        step_types = [s.get("type") for s in transcript["outputs"]]
+        assert "google_search_call" in step_types
+
+    def test_fallback_engages_when_fetch_has_no_report_content(self) -> None:
+        im = genai_interactions
+        empty_fetch = im.Interaction(
+            id="int-stream-2",
+            created="2026-07-07T00:00:00Z",
+            updated="2026-07-07T00:10:00Z",
+            status="completed",
+            steps=[],
+        )
+        merged = _with_fallback_outputs(empty_fetch, self._STREAM_BUFFER)
+        assert build_report_text(merged) == "STREAM BUFFER TEXT"
+
+    def test_thought_only_fetch_does_not_shadow_streamed_body(self, tmp_path: Path) -> None:
+        im = genai_interactions
+        thought_only = im.Interaction(
+            id="int-stream-3",
+            created="2026-07-07T00:00:00Z",
+            updated="2026-07-07T00:10:00Z",
+            status="completed",
+            steps=[
+                im.ThoughtStep(
+                    type="thought",
+                    summary=[im.TextContent(type="text", text="pondering")],
+                )
+            ],
+        )
+        merged = _with_fallback_outputs(thought_only, self._STREAM_BUFFER)
+        assert build_report_text(merged) == "STREAM BUFFER TEXT"
+        # Merge, don't rebuild: the fetch's step timeline must survive into
+        # the transcript even when the streamed body stands in for the report.
+        transcript = build_transcript(merged, policy=SecurityPolicy(output_root=tmp_path))
+        assert "thought" in [s.get("type") for s in transcript["outputs"]]

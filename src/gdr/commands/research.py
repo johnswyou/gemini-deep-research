@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +49,7 @@ from gdr.core.models import (
     Record,
     RunContext,
 )
-from gdr.core.normalize import error_of, get_field
+from gdr.core.normalize import error_of, get_field, has_report_content
 from gdr.core.persistence import JsonlStore, Store
 from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
@@ -366,12 +367,20 @@ def run(
     previous_interaction_id: str | None = None
     approve_input: str | None = None
     if use_plan and not dry_run:
+        # The Max cost gate must precede the *plan* interaction: the plan
+        # itself already runs on the Max agent, and by approval time
+        # previous_interaction_id is set, which skips the gate inside
+        # execute_research.
+        if use_max and config.confirm_max and not no_confirm and not _confirm_max(console):
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(code=0)
         client = _safe_build_client(console, api_key=api_key, config=config)
         plan_id = interactive_plan_loop(
             client,
             initial_query=query,
             agent=_resolve_agent(config, use_max=use_max),
             console=console,
+            input_parts=extra_parts,
         )
         if plan_id is None:
             console.print("[yellow]Plan cancelled.[/yellow]")
@@ -516,31 +525,20 @@ def execute_research(
     client = _safe_build_client(console, api_key=api_key, config=config)
 
     started_at = datetime.now(_UTC)
-    try:
-        create_result = client.interactions.create(**kwargs)
-    except Exception as exc:
-        raise NetworkError(f"Failed to start research: {exc}") from exc
+    create_outcome, interaction_id, recorded_dirs = _submit_interaction(
+        client=client,
+        kwargs=kwargs,
+        use_stream=use_stream,
+        console=console,
+        display_query=display_query,
+        config=config,
+        output=output,
+        policy=policy,
+        ctx_for_kwargs=ctx_for_kwargs,
+        started_at=started_at,
+    )
 
-    try:
-        create_outcome = _consume_create_result(
-            create_result,
-            use_stream=use_stream,
-            console=console,
-            query=display_query,
-            client=client,
-        )
-    except StreamError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=exc.exit_code) from exc
-
-    interaction_id = create_outcome.interaction_id
-    if not interaction_id:
-        if create_outcome.interrupted:
-            console.print("[yellow]Interrupted before the API returned an id.[/yellow]")
-            raise typer.Exit(code=EXIT_INTERRUPTED)
-        raise NetworkError("API returned no interaction id; cannot proceed.")
-
-    final_output_dir = _allocate_output_dir(
+    final_output_dir = recorded_dirs.get(interaction_id) or _allocate_output_dir(
         root=config.output_dir,
         query=display_query,
         interaction_id=interaction_id,
@@ -551,16 +549,13 @@ def execute_research(
 
     ctx = ctx_for_kwargs.model_copy(update={"output_dir": final_output_dir})
 
-    # Record the run the moment it is addressable. Recovery commands
-    # (`gdr ls` / `status` / `resume`) must see interrupted, failed, and
-    # timed-out runs — not just the ones that finished cleanly. The
-    # terminal append at the end overwrites this row (last write wins).
-    _record_run(
-        interaction={"id": interaction_id, "status": STATUS_IN_PROGRESS},
-        ctx=ctx,
-        started_at=started_at,
-        finished_at=None,
-    )
+    if interaction_id not in recorded_dirs:
+        _record_run(
+            interaction={"id": interaction_id, "status": STATUS_IN_PROGRESS},
+            ctx=ctx,
+            started_at=started_at,
+            finished_at=None,
+        )
 
     if create_outcome.interrupted:
         _print_interrupted(console, interaction_id)
@@ -586,6 +581,111 @@ def execute_research(
         raise typer.Exit(code=EXIT_INTERRUPTED) from None
 
 
+def _submit_interaction(
+    *,
+    client: GdrClient,
+    kwargs: dict[str, Any],
+    use_stream: bool,
+    console: Console,
+    display_query: str,
+    config: Config,
+    output: Path | None,
+    policy: SecurityPolicy,
+    ctx_for_kwargs: RunContext,
+    started_at: datetime,
+) -> tuple[_CreateOutcome, str, dict[str, Path]]:
+    """Create the interaction and consume its stream when streaming.
+
+    Returns the outcome, a validated interaction id, and the map of ids
+    already recorded (with their allocated output dirs) by the stream's
+    on-start callback. A mid-stream ``error`` event exits with a reattach
+    hint — the run was recorded when the stream announced its id — and an
+    interrupt before any id is known exits 130.
+    """
+    try:
+        create_result = client.interactions.create(**kwargs)
+    except Exception as exc:
+        raise NetworkError(f"Failed to start research: {exc}") from exc
+
+    record_stream_start, recorded_dirs = _make_stream_start_recorder(
+        config=config,
+        display_query=display_query,
+        started_at=started_at,
+        output=output,
+        policy=policy,
+        ctx_for_kwargs=ctx_for_kwargs,
+    )
+
+    try:
+        create_outcome = _consume_create_result(
+            create_result,
+            use_stream=use_stream,
+            console=console,
+            query=display_query,
+            client=client,
+            on_interaction_id=record_stream_start,
+        )
+    except StreamError as exc:
+        console.print(f"[red]{exc}[/red]")
+        if exc.interaction_id:
+            # The run was recorded when the stream announced its id; tell
+            # the user how to pick it back up.
+            _print_reattach_hint(console, exc.interaction_id)
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    interaction_id = create_outcome.interaction_id
+    if not interaction_id:
+        if create_outcome.interrupted:
+            console.print("[yellow]Interrupted before the API returned an id.[/yellow]")
+            raise typer.Exit(code=EXIT_INTERRUPTED)
+        raise NetworkError("API returned no interaction id; cannot proceed.")
+
+    return create_outcome, interaction_id, recorded_dirs
+
+
+def _make_stream_start_recorder(
+    *,
+    config: Config,
+    display_query: str,
+    started_at: datetime,
+    output: Path | None,
+    policy: SecurityPolicy,
+    ctx_for_kwargs: RunContext,
+) -> tuple[Callable[[str], None], dict[str, Path]]:
+    """Build the on-start callback that records a streamed run early.
+
+    Recovery commands (`gdr ls` / `status` / `resume`) must see
+    interrupted, failed, and timed-out runs — not just the ones that
+    finished cleanly. Streamed runs learn their id mid-stream
+    (`interaction.created`), so the in_progress record is written from
+    inside the stream via this callback; the polling path records right
+    after create() returns instead. The terminal append at the end of the
+    run overwrites the row (last write wins). The returned dict maps
+    recorded ids to their allocated output dirs so the post-stream path
+    can reuse them without re-recording.
+    """
+    recorded_dirs: dict[str, Path] = {}
+
+    def _record(new_id: str) -> None:
+        directory = _allocate_output_dir(
+            root=config.output_dir,
+            query=display_query,
+            interaction_id=new_id,
+            started_at=started_at,
+            override=output,
+            policy=policy,
+        )
+        recorded_dirs[new_id] = directory
+        _record_run(
+            interaction={"id": new_id, "status": STATUS_IN_PROGRESS},
+            ctx=ctx_for_kwargs.model_copy(update={"output_dir": directory}),
+            started_at=started_at,
+            finished_at=None,
+        )
+
+    return _record, recorded_dirs
+
+
 def _build_request_kwargs(
     ctx: RunContext,
     policy: SecurityPolicy,
@@ -604,7 +704,7 @@ def _build_request_kwargs(
     if plan_mode_for_dry_run and dry_run:
         from gdr.core.planning import PlanRequest, build_plan_kwargs  # noqa: PLC0415 — lazy
 
-        req = PlanRequest(input_text=ctx.query, agent=ctx.agent)
+        req = PlanRequest(input_text=ctx.query, agent=ctx.agent, input_parts=ctx.input_parts)
         return build_plan_kwargs(req), []
 
     kwargs, stripped = build_create_kwargs(ctx, policy)
@@ -729,6 +829,7 @@ def _consume_create_result(
     console: Console,
     query: str,
     client: GdrClient | None = None,
+    on_interaction_id: Callable[[str], None] | None = None,
 ) -> _CreateOutcome:
     """Extract the interaction id from ``client.interactions.create()``.
 
@@ -767,6 +868,7 @@ def _consume_create_result(
         query=query,
         on_disconnect=_on_disconnect,
         reconnect=_reconnect if client is not None else None,
+        on_start=on_interaction_id,
     )
     clean_completion = result.completed_cleanly and result.status in (None, STATUS_COMPLETED)
     return _CreateOutcome(
@@ -783,12 +885,19 @@ def _with_fallback_outputs(
     *,
     fallback_total_tokens: int | None = None,
 ) -> Any:
-    """Attach cleanly streamed outputs when the terminal fetch has none.
+    """Attach cleanly streamed outputs when the terminal fetch has no report.
+
+    The fetch is authoritative whenever it carries renderable report
+    content — under the 2.x schema that content arrives in the ``steps``
+    timeline, so the check goes through the normalizer, never a raw field
+    (``Interaction`` has no ``outputs`` attribute to key on). The streamed
+    buffer only stands in when the fetch has no report at all (the
+    empty-fetch backends the v0.1.2 hotfix targeted).
 
     Also fills in usage from the stream's completion event when the fetch
     carries none, so streamed runs don't lose their token counts.
     """
-    if not fallback_outputs or bool(get_field(interaction, "outputs")):
+    if not fallback_outputs or has_report_content(interaction):
         return interaction
 
     usage = get_field(interaction, "usage")
@@ -804,6 +913,11 @@ def _with_fallback_outputs(
         "outputs": outputs,
         "usage": usage,
         "error": get_field(interaction, "error"),
+        # Merge, don't rebuild: keep the fetch's timeline and timestamps so
+        # the transcript writer (which prefers ``steps``) and resume-time
+        # consumers don't lose them when the streamed body stands in.
+        "steps": get_field(interaction, "steps"),
+        "updated": get_field(interaction, "updated"),
     }
 
 
@@ -859,13 +973,17 @@ def _print_not_completed(
     console.print(f"Partial artifacts (metadata + transcript) saved to: {paths['report'].parent}")
 
 
-def _print_interrupted(console: Console, interaction_id: str) -> None:
-    console.print()
+def _print_reattach_hint(console: Console, interaction_id: str) -> None:
     console.print(
-        f"[yellow]Interrupted.[/yellow] The research continues server-side.\n"
         f"  Check on it:  [bold]gdr status {interaction_id}[/bold]\n"
         f"  Reattach:     [bold]gdr resume {interaction_id}[/bold]"
     )
+
+
+def _print_interrupted(console: Console, interaction_id: str) -> None:
+    console.print()
+    console.print("[yellow]Interrupted.[/yellow] The research continues server-side.")
+    _print_reattach_hint(console, interaction_id)
 
 
 def _print_dry_run(console: Console, kwargs: dict[str, Any]) -> None:

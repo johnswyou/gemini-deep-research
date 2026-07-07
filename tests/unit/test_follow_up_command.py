@@ -277,3 +277,37 @@ class TestModelFollowUp:
 
         assert result.exit_code == 4
         assert "mutually exclusive" in result.output
+
+
+class TestAgentFollowUpRejection:
+    """The Gemini API has been rejecting Deep Research follow-ups on
+    completed research parents with an opaque HTTP 400. When that
+    happens, the error must tell the user about the `--model` fallback
+    instead of leaving them with the raw server message."""
+
+    def test_agent_mode_400_prints_model_fallback_hint(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        fake_interactions = MagicMock()
+        fake_interactions.create.side_effect = Exception(
+            "Error code: 400 - There was a problem processing your request."
+        )
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "int-parent-1",
+                "Elaborate on section 3",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-XXXXXXXXXXXXX",
+            ],
+        )
+        assert result.exit_code == 5
+        assert "--model" in result.output

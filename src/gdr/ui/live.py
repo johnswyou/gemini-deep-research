@@ -196,6 +196,7 @@ def stream_with_live_ui(
     query: str = "",
     on_disconnect: DisconnectCallback | None = None,
     reconnect: ReconnectFn | None = None,
+    on_start: Callable[[str], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> LiveStreamResult:
     """Drive a streaming interaction through the renderer + status UI.
@@ -208,6 +209,11 @@ def stream_with_live_ui(
     back to the disconnect path, so partial output isn't thrown away
     over a transient blip.
 
+    ``on_start`` is invoked exactly once, with the interaction id, when
+    the stream first announces it — long before the stream ends. Callers
+    use it to persist the run while it is still streaming (reconnects may
+    replay the created event; the callback still fires only once).
+
     Returns a :class:`LiveStreamResult` with everything the caller needs
     to continue (via polling fallback if necessary). Raises
     :class:`StreamError` if the API sent an explicit error event; these
@@ -216,7 +222,21 @@ def stream_with_live_ui(
     """
     con = console if console is not None else Console()
     renderer = LiveRenderer(console=con, query=query, clock=clock)
-    agg = StreamAggregator(on_event=renderer.handle)
+    start_notified = False
+
+    def _dispatch(event: StreamEvent) -> None:
+        nonlocal start_notified
+        renderer.handle(event)
+        if (
+            on_start is not None
+            and not start_notified
+            and event.kind == "start"
+            and event.interaction_id
+        ):
+            start_notified = True
+            on_start(event.interaction_id)
+
+    agg = StreamAggregator(on_event=_dispatch)
 
     # The status text is a live renderable: Rich's refresh thread re-renders
     # it several times a second, so the elapsed timer ticks even during

@@ -38,7 +38,7 @@ from gdr.commands._common import (
     stdout_is_tty,
 )
 from gdr.commands.research import execute_research
-from gdr.errors import ConfigError
+from gdr.errors import ConfigError, NetworkError
 
 
 @friendly_errors
@@ -113,18 +113,33 @@ def run(
             "(code_execution / mcp_server stay disabled).[/dim]"
         )
 
-    execute_research(
-        config=config,
-        display_query=question,
-        use_max=use_max,
-        use_stream=use_stream,
-        output=output,
-        api_key=api_key,
-        no_confirm=no_confirm,
-        console=console,
-        dry_run=dry_run,
-        previous_interaction_id=interaction_id,
-        api_input=question,
-        untrusted_input=effective_untrusted,
-        model=model,
-    )
+    try:
+        execute_research(
+            config=config,
+            display_query=question,
+            use_max=use_max,
+            use_stream=use_stream,
+            output=output,
+            api_key=api_key,
+            no_confirm=no_confirm,
+            console=console,
+            dry_run=dry_run,
+            previous_interaction_id=interaction_id,
+            api_input=question,
+            untrusted_input=effective_untrusted,
+            model=model,
+        )
+    except NetworkError as exc:
+        # The Gemini API has been rejecting agent follow-ups on completed
+        # research parents with an opaque HTTP 400. Point at the two
+        # workarounds instead of leaving the raw server message.
+        if model is None and "Failed to start research" in str(exc) and "400" in str(exc):
+            raise NetworkError(
+                f"{exc}\n"
+                f"The API currently rejects Deep Research follow-ups on completed "
+                f"research runs. Alternatives:\n"
+                f"  • cheap clarification over the same context:\n"
+                f"      gdr follow-up {interaction_id} {question!r} --model gemini-3.1-pro-preview\n"
+                f"  • or a fresh run with the relevant context quoted in the query."
+            ) from exc
+        raise

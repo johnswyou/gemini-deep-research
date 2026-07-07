@@ -424,7 +424,11 @@ class StreamAggregator:
         err = _get(event, "error", {}) or {}
         code = str(_get(err, "code", "unknown"))
         message = str(_get(err, "message", ""))
-        raise StreamError(f"Stream error {code}: {message}".rstrip(": "))
+        exc = StreamError(f"Stream error {code}: {message}".rstrip(": "))
+        # Carry the id (when the stream got far enough to announce one) so
+        # the command layer can point the user at `gdr resume <id>`.
+        exc.interaction_id = self._interaction_id
+        raise exc
 
 
 def _content_type_from_start_event(event: Any) -> str | None:

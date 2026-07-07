@@ -487,3 +487,70 @@ class TestPlaintextMcpWarning:
 
         assert result.exit_code == 0
         assert "sent unencrypted" not in result.output
+
+
+class TestStreamErrorRecovery:
+    """A mid-stream ``error`` event must leave a recoverable trail.
+
+    The run is recorded (in_progress) the moment the stream announces its
+    interaction id — not after the stream ends — and the failure message
+    says how to reattach. Previously the StreamError path exited before
+    any record was written and the id was lost with it.
+    """
+
+    def test_stream_error_event_leaves_record_and_resume_hint(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        events = [
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "interrstream1", "status": "in_progress"},
+            },
+            {
+                "event_type": "error",
+                "error": {"code": "RATE_LIMITED", "message": "Quota exceeded."},
+            },
+        ]
+        _install_fake_sdk(mocker, created=iter(events), got=_completed(id_="interrstream1"))
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--stream"],
+        )
+
+        assert result.exit_code == 1
+        assert "gdr resume interrstream1" in result.output
+        record = _store(tmp_path).find_by_id("interrstream1")
+        assert record is not None
+        assert record.status == "in_progress"
+
+    def test_streamed_clean_run_writes_exactly_two_record_rows(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # in_progress at interaction.created + terminal at the end — the
+        # post-stream path must not append a redundant third row.
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        events = [
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "intstreamrec1", "status": "in_progress"},
+            },
+            {
+                "event_type": "interaction.completed",
+                "interaction": {"id": "intstreamrec1", "status": "completed"},
+            },
+        ]
+        _install_fake_sdk(mocker, created=iter(events), got=_completed(id_="intstreamrec1"))
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--stream"],
+        )
+
+        assert result.exit_code == 0, result.output
+        raw_lines = (tmp_path / "state" / "interactions.jsonl").read_text().strip().splitlines()
+        assert len(raw_lines) == 2
+        record = _store(tmp_path).find_by_id("intstreamrec1")
+        assert record is not None
+        assert record.status == "completed"
