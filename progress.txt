@@ -1877,3 +1877,29 @@ overwritten. Hence the RC-first habit for anything risky.
   - A trivial-query fast research run (~90k tokens, ~90s) is the
     cheapest way to mint a fresh completed Deep Research parent for
     live tests.
+
+## 2026-07-07 - Release v0.1.4
+- Cut and shipped v0.1.4 (the review-remediation release) following the
+  documented flow: CHANGELOG Unreleased -> [0.1.4] - 2026-07-07 (+ fresh
+  empty Unreleased + compare links), version bumped in pyproject.toml
+  AND src/gdr/__init__.py, `chore: release v0.1.4` (a6d16b1) pushed,
+  CI green on the release commit (8-job matrix), tag v0.1.4 pushed.
+- Release workflow 28907065248 succeeded end-to-end: version guard,
+  build, GitHub Release (wheel + sdist attached, not prerelease), and
+  the Publish-to-PyPI step. PyPI shows 0.1.4 with both files uploaded
+  23:56 UTC; clean-room `uvx --from gemini-deep-research==0.1.4 gdr
+  --version` verified against the live index.
+- Pre-flight before tagging: versions matched, 464 tests + ruff +
+  format + mypy strict green, `uv build` + twine check PASSED, sdist
+  leakage scan clean (no progress.txt/CLAUDE.md/secrets).
+- **Learnings for future iterations:**
+  - `gh run list --workflow Release --limit 1` immediately after a tag
+    push can grab the PREVIOUS release run (registration lag). Match on
+    headBranch == the new tag, or wait a few seconds before listing.
+  - PyPI propagation is staged: the JSON API showed 0.1.4 within
+    seconds of publish, but the simple index (what uv/pip resolve
+    against) lagged ~a minute. A failed install right after publish is
+    usually just this - retry before diagnosing.
+  - GitHub is deprecating Node 20 runners; the pinned checkout/setup-uv
+    SHAs emit deprecation annotations. Bump the pins (keeping the
+    pin-to-SHA convention) before the deprecation becomes an error.
