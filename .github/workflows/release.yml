@@ -15,10 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
-      - uses: actions/checkout@v4
+      # This workflow holds id-token: write (PyPI trusted publishing), so
+      # every action is pinned to a commit SHA — a hijacked upstream tag
+      # must not be able to mint packages. Comment = tag at pin time.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
         with:
           enable-cache: true
 
@@ -79,4 +82,4 @@ jobs:
       # consistent with the release-creation step's prerelease check.
       - name: Publish to PyPI
         if: ${{ !contains(github.ref, '-rc.') }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

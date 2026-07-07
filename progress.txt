@@ -1564,3 +1564,43 @@ overwritten. Hence the RC-first habit for anything risky.
     exit codes and message text, and `result.exception is None or
     SystemExit` to prove no traceback leaked.
 ---
+
+## 2026-07-07 - Follow-up round (deferred review items)
+- `gdr follow-up --model <id>`: plain-model follow-ups send `model=` on
+  the wire with NO agent/agent_config/tools (matches the docs' cheap
+  clarification example). Mutually exclusive with --max. RunContext
+  gained `model: str | None`; build_create_kwargs branches on it.
+- Untrusted posture inheritance: Record persists `untrusted`; follow-up
+  looks up the parent record and inherits the posture (with a visible
+  note); follow-up also gained an explicit --untrusted-input flag.
+- SSE reconnect: aggregator tracks `last_event_id` from every event;
+  stream_with_live_ui re-attaches via
+  get(id=..., stream=True, last_event_id=...) up to 3 times before the
+  disconnect fallback. Reconnect failures (old SDK without the param,
+  API error, non-iterable result) degrade gracefully via iter() inside
+  the guard. Streamed usage (completion event) survives an empty fetch
+  into record + metadata.
+- tests/unit/test_sdk_contract.py: kwargs contract vs REAL SDK
+  signatures (create agent-shape + model-shape, get id/stream/
+  last_event_id, cancel), AgentConfig fields vs DeepResearchAgentConfig,
+  and the adapter/renderer driven by real Interaction/TextContent/
+  ThoughtContent/ImageContent/Usage instances. Plus a canary asserting
+  gdr knows every status in the SDK's Literal.
+- Workflows: actions pinned to commit SHAs (checkout v4 -> 34e11487...,
+  setup-uv v3 -> caf0cab7..., pypi-publish release/v1 -> cef22109...).
+  Note: release.yml had already replaced softprops with `gh release
+  create` - only three actions needed pinning.
+- Tests: 403 -> 424. ruff/format/mypy strict/pytest all green.
+- **Learnings for future iterations:**
+  - The container proxy scopes api.github.com to session repos (curl
+    gets a 404-ish policy message); WebFetch is the way to read public
+    GitHub metadata (e.g. action tag SHAs) from this environment.
+  - MagicMock supports iter() by default BUT configured return_values
+    (SimpleNamespace) don't - reconnect-style code must iter() inside
+    its own try/except to degrade on non-iterable results.
+  - `nonlocal x` in a closure requires the binding to appear before the
+    def in the enclosing scope for mypy (runtime is laxer).
+  - genai.Client(api_key=...) constructs offline; client.interactions
+    emits an "experimental" UserWarning - fine to leave visible in the
+    contract tests as a version-drift signal.
+---
