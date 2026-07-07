@@ -114,7 +114,8 @@ def _check_genai() -> CheckResult:
             "google-genai installed",
             "fail",
             f"version={version} is older than the required {MIN_GENAI_VERSION} "
-            f"(no Interactions API); run `pip install -U google-genai`",
+            f"(speaks the retired legacy Interactions schema, which the backend "
+            f"rejects); run `pip install -U google-genai`",
         )
     return (
         "google-genai installed",

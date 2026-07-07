@@ -414,3 +414,17 @@ class TestWriteArtifactsWithImages:
         assert (output_dir / "images" / "image_001.png").read_bytes() == _TINY_PNG_BYTES
         report = paths["report"].read_text(encoding="utf-8")
         assert "![Image 1](images/image_001.png)" in report
+
+
+class TestReportTimestamp:
+    def test_header_uses_finished_at_not_render_time(self) -> None:
+        # `gdr resume` renders long after the run finished; the header
+        # must reflect when the research happened, not when it was written.
+        interaction = _fake_interaction(outputs=[_text_output("Body.")])
+        md = render_report_markdown(
+            interaction,
+            query="q",
+            agent="a",
+            finished_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=_UTC),
+        )
+        assert "2026-05-01T12:00:00Z" in md

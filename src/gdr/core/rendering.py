@@ -158,6 +158,7 @@ def render_report_markdown(
     agent: str,
     sources: Iterable[dict[str, Any]] | None = None,
     image_filenames: Iterable[str] | None = None,
+    finished_at: datetime | None = None,
 ) -> str:
     """Assemble the final ``report.md`` body.
 
@@ -167,12 +168,19 @@ def render_report_markdown(
     or ``image_filenames`` keeps the rendering deterministic when callers
     have already collected them (the tests, notably); otherwise we
     recollect from the interaction.
+
+    ``finished_at`` stamps the header line — ``gdr resume`` renders long
+    after the run finished, so falling back to the render wallclock is a
+    last resort, not the norm.
     """
     source_list = list(sources) if sources is not None else collect_sources(interaction)
     image_list = list(image_filenames) if image_filenames is not None else []
     body = build_report_text(interaction) or "*(No final report text was returned.)*"
 
-    ts = datetime.now(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp = finished_at if finished_at is not None else datetime.now(_UTC)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=_UTC)
+    ts = stamp.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = [
         f"# {query}",
         "",
@@ -389,6 +397,7 @@ def write_artifacts(
         agent=ctx.agent,
         sources=sources,
         image_filenames=[p.name for p in image_paths],
+        finished_at=finished_at,
     )
     metadata = build_metadata(
         interaction,

@@ -49,7 +49,7 @@ from gdr.core.models import (
     Record,
     RunContext,
 )
-from gdr.core.normalize import error_of, get_field, has_report_content
+from gdr.core.normalize import error_of, get_field, has_report_content, interaction_status
 from gdr.core.persistence import JsonlStore, Store
 from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
@@ -502,7 +502,10 @@ def execute_research(
             f"[yellow]Untrusted-input mode stripped tools:[/yellow] {', '.join(stripped)}"
         )
 
-    _warn_plaintext_mcp(console, ctx_for_kwargs.mcp_servers)
+    # Untrusted mode strips mcp_server from the request, so there are no
+    # credentials in flight to warn about.
+    if not policy.untrusted:
+        _warn_plaintext_mcp(console, ctx_for_kwargs.mcp_servers)
 
     if dry_run:
         _print_dry_run(console, kwargs)
@@ -605,6 +608,14 @@ def _submit_interaction(
     try:
         create_result = client.interactions.create(**kwargs)
     except Exception as exc:
+        # google-genai's APIError carries the HTTP status in `.code`. A
+        # rejected key is an auth problem (documented exit 4), not a
+        # network failure (exit 5).
+        if getattr(exc, "code", None) in (401, 403):
+            raise ConfigError(
+                f"The API rejected the request as unauthorized: {exc}. "
+                f"Check your API key (`gdr doctor` shows which one is active)."
+            ) from exc
         raise NetworkError(f"Failed to start research: {exc}") from exc
 
     record_stream_start, recorded_dirs = _make_stream_start_recorder(
@@ -626,6 +637,16 @@ def _submit_interaction(
             on_interaction_id=record_stream_start,
         )
     except StreamError as exc:
+        # An external `gdr cancel` kills the stream with a generic
+        # api_error event; the interaction's real status says what
+        # actually happened. Exit 2 (documented "cancelled") when so.
+        if exc.interaction_id and _current_status(client, exc.interaction_id) == STATUS_CANCELLED:
+            console.print(
+                f"[yellow]Research cancelled (interaction id: {exc.interaction_id}).[/yellow]\n"
+                f"Artifacts were not written; `gdr resume {exc.interaction_id}` "
+                f"renders the post-mortem."
+            )
+            raise typer.Exit(code=ResearchCancelledError.exit_code) from exc
         console.print(f"[red]{exc}[/red]")
         if exc.interaction_id:
             # The run was recorded when the stream announced its id; tell
@@ -929,6 +950,14 @@ def _warn_plaintext_mcp(console: Console, mcp_servers: tuple[McpSpec, ...]) -> N
                 f"[yellow]Warning:[/yellow] MCP server {spec.name!r} uses plain http:// "
                 f"with auth headers — credentials will be sent unencrypted."
             )
+
+
+def _current_status(client: GdrClient, interaction_id: str) -> str | None:
+    """Best-effort status probe; None when the fetch itself fails."""
+    try:
+        return interaction_status(client.interactions.get(id=interaction_id))
+    except Exception:
+        return None
 
 
 def _refetch_terminal(client: GdrClient, interaction_id: str, *, fallback_status: GdrError) -> Any:

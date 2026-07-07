@@ -29,6 +29,8 @@ from gdr.commands._common import (
     lookup_record,
     open_store,
 )
+from gdr.constants import TERMINAL_STATUSES
+from gdr.core.models import Record
 from gdr.core.normalize import normalized_outputs
 from gdr.errors import NetworkError
 from gdr.ui.progress import format_elapsed
@@ -60,13 +62,12 @@ def run(
     console.print(f"[bold]Status:[/bold] {_colored_status(status)}")
     console.print(f"[bold]ID:[/bold]     {interaction_id}")
 
-    # Elapsed time — best-effort, only when we have a started_at in the
-    # local store. The SDK does not expose a started_at on the interaction
-    # object itself.
+    # Timing — best-effort, only when we have a local record. The SDK does
+    # not expose a started_at on the interaction object itself.
     store = open_store()
     record = lookup_record(store, interaction_id)
     if record is not None:
-        _print_elapsed(console, record.created_at)
+        _print_timing(console, record, status=status)
 
     _print_usage(console, interaction)
     _print_last_thought(console, interaction)
@@ -88,10 +89,25 @@ def _colored_status(status: str) -> str:
     return f"[{color}]{status}[/{color}]"
 
 
-def _print_elapsed(console: Console, created_at: datetime) -> None:
-    now = datetime.now(_UTC)
-    anchor = created_at if created_at.tzinfo else created_at.replace(tzinfo=_UTC)
-    elapsed = (now - anchor).total_seconds()
+def _print_timing(console: Console, record: Record, *, status: str) -> None:
+    """Elapsed wallclock for a running interaction; run duration once done.
+
+    ``now - created_at`` on a terminal run is the record's *age* (a run
+    that finished in ten minutes yesterday would show 20+ hours), so
+    terminal statuses report the recorded duration instead.
+    """
+    anchor = (
+        record.created_at if record.created_at.tzinfo else record.created_at.replace(tzinfo=_UTC)
+    )
+    if status in TERMINAL_STATUSES and record.finished_at is not None:
+        end = (
+            record.finished_at
+            if record.finished_at.tzinfo
+            else record.finished_at.replace(tzinfo=_UTC)
+        )
+        console.print(f"[bold]Duration:[/bold] {format_elapsed((end - anchor).total_seconds())}")
+        return
+    elapsed = (datetime.now(_UTC) - anchor).total_seconds()
     console.print(f"[bold]Elapsed:[/bold] {format_elapsed(elapsed)}")
 
 

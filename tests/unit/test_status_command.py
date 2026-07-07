@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -128,3 +128,37 @@ class TestStatus:
         )
         assert result.exit_code == 5
         assert "API down" in result.output
+
+
+class TestTerminalTiming:
+    def test_terminal_run_shows_duration_not_wallclock_age(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # A run that finished in 10 minutes yesterday must not print a
+        # 20-hour "Elapsed" — that is the record's age, not the run time.
+        created = datetime.now(_UTC) - timedelta(hours=20)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        JsonlStore.open(state_dir / "interactions.jsonl").append(
+            Record(
+                id="intdone-9",
+                created_at=created,
+                finished_at=created + timedelta(minutes=10),
+                status="completed",
+                agent="deep-research-preview-04-2026",
+                query="Some query",
+                output_dir=tmp_path / "reports" / "x",
+            )
+        )
+        _install_fake_sdk(
+            mocker,
+            got=SimpleNamespace(id="intdone-9", status="completed", outputs=[], usage=None),
+        )
+        result = runner.invoke(
+            app,
+            ["status", "intdone-9", "--api-key", "AIzaSy-test-key-XXXX"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Duration" in result.output
+        assert "10:00" in result.output
+        assert "20:00:" not in result.output

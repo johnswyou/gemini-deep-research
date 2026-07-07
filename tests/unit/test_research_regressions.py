@@ -554,3 +554,82 @@ class TestStreamErrorRecovery:
         record = _store(tmp_path).find_by_id("intstreamrec1")
         assert record is not None
         assert record.status == "completed"
+
+
+class TestSmallBehaviors:
+    def test_plaintext_mcp_warning_suppressed_when_untrusted_strips_it(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # Untrusted mode strips mcp_server from the request — warning
+        # about credentials that will never be sent is just noise.
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "q",
+                "--dry-run",
+                "--untrusted-input",
+                "--mcp",
+                "deploys=http://mcp.example.com",
+                "--mcp-header",
+                "deploys=Authorization:Bearer abc",
+                "--config",
+                str(cfg),
+                "--api-key",
+                _KEY,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "stripped tools" in result.output
+        assert "sent unencrypted" not in result.output
+
+    def test_create_401_is_a_config_error_exit_4(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # An invalid API key is an auth problem (documented exit 4), not
+        # a network failure (exit 5).
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+
+        class FakeAuthError(Exception):
+            code = 401
+
+        fake_interactions = MagicMock()
+        fake_interactions.create.side_effect = FakeAuthError("API key not valid")
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--no-stream", "--config", str(cfg), "--api-key", _KEY],
+        )
+        assert result.exit_code == 4
+        assert "key" in result.output.lower()
+
+    def test_stream_error_after_external_cancel_exits_2(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # `gdr cancel` from another terminal kills the stream with a
+        # generic api_error event; the run's real status is `cancelled`
+        # and the exit code must say so (documented exit 2).
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        events = [
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "intextcancel1", "status": "in_progress"},
+            },
+            {
+                "event_type": "error",
+                "error": {"code": "api_error", "message": "There was a problem."},
+            },
+        ]
+        cancelled = SimpleNamespace(id="intextcancel1", status="cancelled", outputs=[], usage=None)
+        _install_fake_sdk(mocker, created=iter(events), got=cancelled)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--stream", "--config", str(cfg), "--api-key", _KEY],
+        )
+        assert result.exit_code == 2
+        assert "cancelled" in result.output.lower()

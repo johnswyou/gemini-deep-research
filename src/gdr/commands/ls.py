@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 from gdr.commands._common import friendly_errors, open_store, parse_since
+from gdr.constants import AGENT_FAST, AGENT_MAX
 from gdr.core.models import Record
 from gdr.errors import ConfigError
 
@@ -125,14 +126,20 @@ def _format_status(status: str) -> str:
     return f"[{color}]{status}[/{color}]"
 
 
+_AGENT_LABELS = {
+    AGENT_FAST: "preview",
+    AGENT_MAX: "max",
+}
+
+
 def _shorten_agent(agent: str) -> str:
-    # 'deep-research-preview-04-2026' → 'preview'
-    # 'deep-research-max-preview-04-2026' → 'max'
-    if "max" in agent:
-        return "max"
-    if "preview" in agent:
-        return "preview"
-    return agent
+    """Short display label for the two known Deep Research agents.
+
+    Exact match only — the ``agent`` column also carries plain model ids
+    from ``--model`` follow-ups (e.g. ``gemini-3.1-pro-preview``), which
+    must render verbatim rather than masquerade as a research agent.
+    """
+    return _AGENT_LABELS.get(agent, agent)
 
 
 def _format_tokens(total_tokens: int | None) -> str:

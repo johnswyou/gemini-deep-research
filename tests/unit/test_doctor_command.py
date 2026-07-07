@@ -186,6 +186,10 @@ class TestGenaiVersionCheck:
         assert result.exit_code == 4
         assert "1.20.0" in result.output
         assert "older than" in result.output
+        # 1.x SDKs *have* the Interactions API — the problem is the retired
+        # legacy wire schema; the message must give the right reason.
+        assert "legacy" in result.output
+        assert "no Interactions API" not in result.output
 
     def test_unknown_sdk_version_warns_but_does_not_fail(
         self, runner: CliRunner, tmp_path: Path, mocker: Any

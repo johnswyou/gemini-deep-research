@@ -135,3 +135,38 @@ class TestLs:
         assert default.exit_code == full.exit_code == 0
         assert long_id not in default.output
         assert long_id in full.output
+
+
+class TestAgentColumn:
+    def test_model_follow_up_agent_is_not_mislabeled(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # A `--model` follow-up record stores the model id in `agent`;
+        # substring matching used to collapse it to "preview" (i.e. the
+        # fast Deep Research agent).
+        _seed_records(
+            tmp_path,
+            _record(
+                "intmodel00001",
+                created_at=datetime(2026, 7, 1, tzinfo=_UTC),
+                agent="gemini-3.1-pro-preview",
+            ),
+        )
+        result = runner.invoke(app, ["ls"])
+        assert result.exit_code == 0
+        assert "gemini-3.1" in result.output
+
+    def test_known_agents_keep_their_short_labels(self, runner: CliRunner, tmp_path: Path) -> None:
+        _seed_records(
+            tmp_path,
+            _record("intfast000001", created_at=datetime(2026, 7, 1, tzinfo=_UTC)),
+            _record(
+                "intmax0000001",
+                created_at=datetime(2026, 7, 2, tzinfo=_UTC),
+                agent="deep-research-max-preview-04-2026",
+            ),
+        )
+        result = runner.invoke(app, ["ls"])
+        assert result.exit_code == 0
+        assert "preview" in result.output
+        assert "max" in result.output
