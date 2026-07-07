@@ -100,7 +100,6 @@ class JsonlStore:
 
     path: Path
     _index: dict[str, Record] = field(default_factory=dict, repr=False)
-    _loaded: bool = field(default=False, repr=False)
 
     # -- construction --------------------------------------------------
 
@@ -116,10 +115,9 @@ class JsonlStore:
     def _load(self) -> None:
         self._index.clear()
         if not self.path.exists():
-            self._loaded = True
             return
         with self.path.open("r", encoding="utf-8") as fh:
-            for lineno, line in enumerate(fh, start=1):
+            for line in fh:
                 stripped = line.strip()
                 if not stripped:
                     continue
@@ -134,8 +132,6 @@ class JsonlStore:
                 except (ValueError, TypeError):
                     continue
                 self._index[record.id] = record
-                _ = lineno  # reserved for future error messages
-        self._loaded = True
 
     # -- mutators ------------------------------------------------------
 

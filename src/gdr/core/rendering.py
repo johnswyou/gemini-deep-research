@@ -14,15 +14,9 @@ Artifact layout written by ``render_artifacts``::
 Image outputs are base64-decoded and written under ``images/`` with a
 predictable name. The final report links them as Markdown image refs.
 
-The module is tolerant of two output shapes:
-
-* **SDK objects** — attributes (``output.type``, ``output.text``, …), as
-  returned by ``google.genai.Client.interactions.get(...)``.
-* **Dict mocks** — plain ``dict[str, Any]``, used in tests to keep fixtures
-  readable without mocking the SDK's internal classes.
-
-We normalize via ``getattr`` with a ``dict.get`` fallback so both work
-without a separate adapter layer.
+Response-shape tolerance (SDK objects vs dicts vs ``steps[].content[]``)
+lives in :mod:`gdr.core.normalize` — this module renders the normalized
+items it returns.
 """
 
 from __future__ import annotations
@@ -37,6 +31,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from gdr.core.models import RunContext
+from gdr.core.normalize import (
+    error_of,
+    normalized_outputs,
+    raw_output_items,
+)
+from gdr.core.normalize import (
+    get_field as _get,
+)
 from gdr.core.security import SecurityPolicy
 
 _UTC = timezone.utc
@@ -45,57 +47,25 @@ _UTC = timezone.utc
 # default the Files API uses.
 _DEFAULT_IMAGE_EXT = ".png"
 
-# ---------------------------------------------------------------------------
-# Output / attribute helpers
-# ---------------------------------------------------------------------------
-
-
-def _get(obj: Any, name: str, default: Any = None) -> Any:
-    """Attribute-then-key lookup.
-
-    The SDK returns typed objects where fields are attributes; tests pass
-    plain dicts where they're keys. This helper bridges both without forcing
-    callers to care which is which.
-    """
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    value = getattr(obj, name, default)
-    return value
-
-
-def _outputs_of(interaction: Any) -> list[Any]:
-    raw = _get(interaction, "outputs", None)
-    if raw is None:
-        return []
-    return list(raw)
-
 
 # ---------------------------------------------------------------------------
 # Report body
 # ---------------------------------------------------------------------------
 
 
-def _is_final_text_output(output: Any) -> bool:
-    """Does this output carry final report text?
-
-    Deep Research emits multiple intermediate `text` outputs for tool/plan
-    steps; the final report is always the last text block. For the MVP we
-    simply concatenate every ``text`` output in order — the agent produces
-    the report as a single text block in practice, and concatenation is
-    harmless for the rare multi-block case.
-    """
-    return bool(_get(output, "type") == "text")
-
-
 def build_report_text(interaction: Any) -> str:
-    """Concatenate the text outputs in order, skipping empties."""
+    """Concatenate the report's text outputs in order, skipping empties.
+
+    Thought summaries and tool call/result content never reach here —
+    ``normalized_outputs`` types them away from ``"text"``. The agent
+    produces the report as a single text block in practice; concatenation
+    is harmless for the rare multi-block case.
+    """
     chunks: list[str] = []
-    for output in _outputs_of(interaction):
-        if not _is_final_text_output(output):
+    for output in normalized_outputs(interaction):
+        if output["type"] != "text":
             continue
-        text = _get(output, "text", "") or ""
+        text = output.get("text", "")
         if text.strip():
             chunks.append(text)
     return "\n\n".join(chunks).strip()
@@ -151,8 +121,8 @@ def collect_sources(interaction: Any) -> list[dict[str, Any]]:
     """
     seen: set[tuple[str, str]] = set()
     collected: list[dict[str, Any]] = []
-    for output in _outputs_of(interaction):
-        if _get(output, "type") != "text":
+    for output in normalized_outputs(interaction):
+        if output["type"] != "text":
             continue
         for annotation in _annotations_of(output):
             citation = _normalize_citation(annotation)
@@ -248,17 +218,17 @@ def extract_images(interaction: Any) -> list[tuple[bytes, str]]:
     payload for debugging.)
     """
     collected: list[tuple[bytes, str]] = []
-    for output in _outputs_of(interaction):
-        if _get(output, "type") != "image":
+    for output in normalized_outputs(interaction):
+        if output["type"] != "image":
             continue
-        raw_data = _get(output, "data")
+        raw_data = output.get("data")
         if not raw_data:
             continue
         try:
             decoded = base64.b64decode(str(raw_data), validate=True)
         except (ValueError, binascii.Error):
             continue
-        mime = _get(output, "mime_type") or "image/png"
+        mime = output.get("mime_type") or "image/png"
         collected.append((decoded, str(mime)))
     return collected
 
@@ -292,8 +262,14 @@ def _usage_dict(interaction: Any) -> dict[str, Any]:
     if usage is None:
         return {}
     total = _get(usage, "total_tokens")
-    inp = _get(usage, "input_tokens")
-    out = _get(usage, "output_tokens")
+    # google-genai 1.73+ spells these `total_input_tokens` /
+    # `total_output_tokens`; older shapes used the bare names.
+    inp = _get(usage, "total_input_tokens")
+    if inp is None:
+        inp = _get(usage, "input_tokens")
+    out = _get(usage, "total_output_tokens")
+    if out is None:
+        out = _get(usage, "output_tokens")
     d: dict[str, Any] = {}
     if total is not None:
         d["total_tokens"] = total
@@ -311,21 +287,35 @@ def build_metadata(
     started_at: datetime,
     finished_at: datetime,
     output_dir: Path,
+    tools_summary: Iterable[str] | None = None,
 ) -> dict[str, Any]:
+    """Assemble ``metadata.json``.
+
+    ``tools_summary`` overrides the tools list derived from ``ctx`` —
+    used by ``gdr resume``, whose reconstructed context has no tool
+    specs but whose Record kept the original summary strings.
+    """
     duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
+    if tools_summary is None:
+        tools = (
+            list(ctx.builtin_tools)
+            + ([] if ctx.file_search is None else ["file_search"])
+            + ["mcp_server"] * len(ctx.mcp_servers)
+        )
+    else:
+        tools = list(tools_summary)
     return {
         "interaction_id": _get(interaction, "id"),
         "previous_interaction_id": ctx.previous_interaction_id,
         "query": ctx.query,
         "agent": ctx.agent,
         "status": _get(interaction, "status"),
+        "error": error_of(interaction),
         "created_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "duration_seconds": duration_seconds,
         "usage": _usage_dict(interaction),
-        "tools": list(ctx.builtin_tools)
-        + ([] if ctx.file_search is None else ["file_search"])
-        + ["mcp_server"] * len(ctx.mcp_servers),
+        "tools": tools,
         "output_dir": str(output_dir),
     }
 
@@ -336,12 +326,14 @@ def build_metadata(
 
 
 def build_transcript(interaction: Any, *, policy: SecurityPolicy) -> dict[str, Any]:
-    """Raw outputs + minimal envelope, with sensitive fields redacted.
+    """Raw timeline + minimal envelope, with sensitive fields redacted.
 
-    Useful for debugging and auditing after the fact. We emit outputs in
-    the order the API returned them so reconstruction is trivial.
+    Useful for debugging and auditing after the fact. Under the 2.x schema
+    the full ``steps`` timeline is emitted (user input, thoughts, tool
+    call/result steps, and model output) so reconstruction is trivial;
+    legacy ``outputs`` payloads fall back to their content items.
     """
-    outputs = _outputs_of(interaction)
+    outputs = _get(interaction, "steps") or raw_output_items(interaction)
     serialized: list[Any] = []
     for output in outputs:
         if isinstance(output, dict):
@@ -379,9 +371,14 @@ def write_artifacts(
     policy: SecurityPolicy,
     started_at: datetime,
     finished_at: datetime,
+    tools_summary: Iterable[str] | None = None,
 ) -> dict[str, Path]:
-    """Write the full artifact set and return a map of name → path."""
-    policy.confine(output_dir)
+    """Write the full artifact set and return a map of name → path.
+
+    ``output_dir`` is trusted here: derived paths were already confined by
+    the command layer at allocation time, and explicit ``--output``
+    overrides are deliberately exempt from confinement (user intent).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     sources = collect_sources(interaction)
@@ -399,6 +396,7 @@ def write_artifacts(
         started_at=started_at,
         finished_at=finished_at,
         output_dir=output_dir,
+        tools_summary=tools_summary,
     )
     transcript = build_transcript(interaction, policy=policy)
 

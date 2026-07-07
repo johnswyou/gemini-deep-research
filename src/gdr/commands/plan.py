@@ -24,6 +24,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from gdr.commands._common import friendly_errors, stdout_is_tty
 from gdr.commands.research import execute_research
 from gdr.config import load_config
 from gdr.core.client import GdrClient
@@ -33,7 +34,8 @@ from gdr.core.planning import (
     run_plan_phase,
     show_plan,
 )
-from gdr.errors import ConfigError, GdrError
+from gdr.core.security import id_fragment
+from gdr.errors import ConfigError, GdrError, NetworkError
 
 app = typer.Typer(
     name="plan",
@@ -73,6 +75,7 @@ def _build_plan_client(
 
 
 @app.command("refine", help="Refine an existing plan with new feedback.")
+@friendly_errors
 def refine_cmd(
     plan_id: str = typer.Argument(..., help="The id of the plan to iterate on."),
     feedback: str = typer.Argument(
@@ -104,8 +107,7 @@ def refine_cmd(
 
     new_id = extract_interaction_id(plan_interaction)
     if not new_id:
-        console.print("[red]Refinement returned no new interaction id.[/red]")
-        raise typer.Exit(code=5)
+        raise NetworkError("Refinement returned no new interaction id.")
 
     console.print(f"[green]New plan id:[/green] [bold]{new_id}[/bold]")
     console.print(
@@ -125,6 +127,7 @@ def refine_cmd(
 
 
 @app.command("approve", help="Approve a plan and run the full research.")
+@friendly_errors
 def approve_cmd(
     plan_id: str = typer.Argument(..., help="The id of the plan to approve and execute."),
     display_query: str | None = typer.Option(
@@ -133,6 +136,12 @@ def approve_cmd(
         "-q",
         help="Optional label for the output directory slug and metadata. "
         "Defaults to a generic 'approved-plan-<id6>' string.",
+    ),
+    use_max: bool = typer.Option(
+        False,
+        "--max",
+        help="Execute with Deep Research Max. Match this to how the plan was "
+        "created — approval does not remember the original --max choice.",
     ),
     stream: bool | None = typer.Option(
         None,
@@ -154,13 +163,13 @@ def approve_cmd(
     console = Console()
     config = load_config(path=config_path)
 
-    use_stream = stream if stream is not None else _stdout_is_tty()
-    label = display_query or f"approved-plan-{_short_id(plan_id)}"
+    use_stream = stream if stream is not None else stdout_is_tty()
+    label = display_query or f"approved-plan-{id_fragment(plan_id)}"
 
     execute_research(
         config=config,
         display_query=label,
-        use_max=False,  # `approve` inherits the agent from the config
+        use_max=use_max,
         use_stream=use_stream,
         output=output,
         api_key=api_key,
@@ -170,20 +179,3 @@ def approve_cmd(
         previous_interaction_id=plan_id,
         api_input="Plan looks good!",
     )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _stdout_is_tty() -> bool:
-    isatty = getattr(sys.stdout, "isatty", None)
-    return bool(isatty()) if callable(isatty) else False
-
-
-def _short_id(interaction_id: str) -> str:
-    """6-char sanitized fragment for use in slugs and display labels."""
-    import re  # noqa: PLC0415 — only needed here
-
-    return re.sub(r"[^A-Za-z0-9]+", "", interaction_id)[:6] or "noid"

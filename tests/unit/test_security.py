@@ -11,6 +11,7 @@ from gdr.core.security import (
     SecurityPolicy,
     ensure_under_root,
     filter_tools_for_untrusted,
+    id_fragment,
     redact_sensitive,
     sanitize_slug,
     validate_mcp_header,
@@ -201,12 +202,10 @@ class TestSecurityPolicy:
         with pytest.raises(ConfigError):
             policy.confine(tmp_path.parent / "elsewhere")
 
-    def test_output_subdir_sanitizes_and_appends_id(self, tmp_path: Path) -> None:
-        policy = SecurityPolicy(output_root=tmp_path)
-        result = policy.output_subdir("Hello World!", "abc123xyz")
-        assert result.name.startswith("hello-world")
-        assert result.name.endswith("_abc123")
-        assert result.is_relative_to(tmp_path.resolve())
+    def test_id_fragment_sanitizes_and_truncates(self) -> None:
+        assert id_fragment("abc123xyz") == "abc123"
+        assert id_fragment("a-b-c-1-2-3-x") == "abc123"
+        assert id_fragment("!!!") == "noid"
 
     def test_filter_tools_respects_untrusted_flag(self) -> None:
         tools = [{"type": "google_search"}, {"type": "code_execution"}]

@@ -198,3 +198,84 @@ class TestHelp:
         assert result.exit_code == 0
         for sub in ("path", "get", "set", "edit"):
             assert sub in result.output
+
+
+# ---------------------------------------------------------------------------
+# Secret redaction on `config get` (2026-07 review)
+# ---------------------------------------------------------------------------
+
+
+class TestGetRedaction:
+    def test_get_redacts_api_key_by_default(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SECRET_KEY_VAR", "AIzaSuperSecret123")
+        _write_config(tmp_path, 'api_key = "env:SECRET_KEY_VAR"\n')
+
+        result = runner.invoke(app, ["config", "get"])
+
+        assert result.exit_code == 0
+        assert "AIzaSuperSecret123" not in result.output
+        assert "[REDACTED]" in result.output
+
+    def test_get_scalar_key_redacted_and_revealable(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SECRET_KEY_VAR", "AIzaSuperSecret123")
+        _write_config(tmp_path, 'api_key = "env:SECRET_KEY_VAR"\n')
+
+        hidden = runner.invoke(app, ["config", "get", "api_key"])
+        assert hidden.exit_code == 0
+        assert "AIzaSuperSecret123" not in hidden.output
+
+        revealed = runner.invoke(app, ["config", "get", "api_key", "--reveal"])
+        assert revealed.exit_code == 0
+        assert "AIzaSuperSecret123" in revealed.output
+
+    def test_get_redacts_mcp_auth_headers(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TOK", "sekrit-token")
+        _write_config(
+            tmp_path,
+            "[mcp_servers.d]\n"
+            'url = "https://mcp.example.com"\n'
+            'headers.Authorization = "Bearer env:TOK"\n',
+        )
+
+        result = runner.invoke(app, ["config", "get", "mcp_servers"])
+
+        assert result.exit_code == 0
+        assert "sekrit-token" not in result.output
+
+    def test_unset_api_key_is_not_masked_as_configured(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _write_config(tmp_path, 'default_agent = "deep-research-preview-04-2026"\n')
+
+        result = runner.invoke(app, ["config", "get", "api_key"])
+
+        assert result.exit_code == 0
+        assert "[REDACTED]" not in result.output
+
+
+class TestSetHardening:
+    def test_set_tightens_file_permissions(self, runner: CliRunner, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app, ["config", "set", "default_agent", "deep-research-preview-04-2026"]
+        )
+        assert result.exit_code == 0
+        mode = (tmp_path / "config.toml").stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_set_literal_api_key_prints_env_hint(self, runner: CliRunner, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["config", "set", "api_key", "AIzaLiteralSecret1234"])
+        assert result.exit_code == 0
+        assert "env:GEMINI_API_KEY" in result.output
+
+    def test_set_env_reference_api_key_prints_no_hint(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = runner.invoke(app, ["config", "set", "api_key", "env:GEMINI_API_KEY"])
+        assert result.exit_code == 0
+        assert "Tip:" not in result.output

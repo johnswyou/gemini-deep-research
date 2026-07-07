@@ -35,6 +35,7 @@ from rich.panel import Panel
 
 from gdr.core.client import GdrClient
 from gdr.core.models import AgentConfig
+from gdr.core.normalize import interaction_id_of, normalized_outputs
 from gdr.errors import GdrError
 from gdr.ui.progress import run_with_live_status
 
@@ -77,6 +78,7 @@ def build_plan_kwargs(req: PlanRequest) -> dict[str, Any]:
         "agent": req.agent,
         "input": req.input_text,
         "background": True,
+        "store": True,
         "agent_config": AgentConfig(
             thinking_summaries="none",
             visualization="off",
@@ -89,36 +91,25 @@ def build_plan_kwargs(req: PlanRequest) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Interaction access (attribute-then-key, same trick as rendering._get)
+# Interaction access
 # ---------------------------------------------------------------------------
-
-
-def _get(obj: Any, name: str, default: Any = None) -> Any:
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
 
 
 def extract_plan_text(interaction: Any) -> str:
     """Pull the plan body from a completed plan interaction.
 
-    Walks the first ``text`` output found. Deep Research always emits the
-    plan as a single text output per the documented flow.
+    Walks the first normalized ``text`` output found. Deep Research emits
+    the plan as a single text output per the documented flow; the
+    normalizer also handles the ``steps[].content[]`` response shape.
     """
-    outputs = _get(interaction, "outputs") or []
-    for output in outputs:
-        if _get(output, "type") == "text":
-            text = _get(output, "text", "") or ""
-            if text.strip():
-                return text
+    for output in normalized_outputs(interaction):
+        if output["type"] == "text" and output.get("text", "").strip():
+            return str(output["text"])
     return ""
 
 
 def extract_interaction_id(interaction: Any) -> str | None:
-    raw = _get(interaction, "id")
-    return None if raw is None else str(raw)
+    return interaction_id_of(interaction)
 
 
 # ---------------------------------------------------------------------------
@@ -173,20 +164,24 @@ def show_plan(console: Console, interaction: Any) -> None:
 def prompt_plan_decision(console: Console) -> PlanDecision:
     """Ask the user whether to approve, refine, or cancel.
 
-    Falls through to APPROVE on empty input (the most common case — the
-    user is happy with the plan and just hits Enter). Anything starting
-    with 'r' means refine; anything starting with 'c' means cancel.
+    Empty input (plain Enter) approves — the most common case. Inputs
+    starting with 'a'/'r'/'c' map to their action; anything else
+    re-prompts. Approving kicks off a paid multi-minute run, so an
+    unrecognized keystroke must never fall through to APPROVE.
     """
     console.print("[bold]What next?[/bold]")
     console.print("  [cyan][A][/cyan]pprove   run the research with this plan")
     console.print("  [cyan][R][/cyan]efine    iterate on the plan with feedback")
     console.print("  [cyan][C][/cyan]ancel    abort this run")
-    raw = typer.prompt("Choice", default="A").strip().lower()
-    if raw.startswith("r"):
-        return PlanDecision.REFINE
-    if raw.startswith("c"):
-        return PlanDecision.CANCEL
-    return PlanDecision.APPROVE
+    while True:
+        raw = typer.prompt("Choice", default="A").strip().lower()
+        if not raw or raw.startswith("a"):
+            return PlanDecision.APPROVE
+        if raw.startswith("r"):
+            return PlanDecision.REFINE
+        if raw.startswith("c"):
+            return PlanDecision.CANCEL
+        console.print("[yellow]Please answer A (approve), R (refine), or C (cancel).[/yellow]")
 
 
 def prompt_refinement_feedback() -> str:
@@ -230,6 +225,13 @@ def interactive_plan_loop(
             if decision == PlanDecision.APPROVE:
                 return plan_id
             if decision == PlanDecision.CANCEL:
+                # Cancelling the run shouldn't discard the plan — print its
+                # id so `gdr plan refine/approve <id>` works in a later
+                # session.
+                console.print(
+                    f"[dim]Plan kept for later:  gdr plan approve {plan_id}  "
+                    f"(or gdr plan refine {plan_id} '<feedback>')[/dim]"
+                )
                 return None
 
             feedback = prompt_refinement_feedback()

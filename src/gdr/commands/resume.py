@@ -26,27 +26,34 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
 
 from gdr.commands._common import (
     build_client,
+    friendly_errors,
     get_attr_or_key,
     load_cfg,
     lookup_record,
     open_store,
 )
-from gdr.constants import TERMINAL_STATUSES
+from gdr.constants import STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, TERMINAL_STATUSES
 from gdr.core.models import AgentConfig, Record, RunContext
 from gdr.core.rendering import write_artifacts
 from gdr.core.security import SecurityPolicy
-from gdr.errors import GdrError
+from gdr.errors import (
+    NetworkError,
+    ResearchCancelledError,
+    ResearchFailedError,
+)
 from gdr.ui.progress import run_with_live_status
 
 _UTC = timezone.utc
 
 
+@friendly_errors
 def run(
     interaction_id: str = typer.Argument(..., help="Interaction id to resume."),
     force: bool = typer.Option(
@@ -81,12 +88,12 @@ def run(
     try:
         latest = client.interactions.get(id=interaction_id)
     except Exception as exc:
-        console.print(f"[red]Failed to fetch interaction:[/red] {exc}")
-        raise typer.Exit(code=5) from exc
+        raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     status = str(get_attr_or_key(latest, "status") or "unknown")
     console.print(f"[bold]Current status:[/bold] {status}")
 
+    failure: ResearchFailedError | ResearchCancelledError | None = None
     if status not in TERMINAL_STATUSES:
         try:
             latest = run_with_live_status(
@@ -95,28 +102,60 @@ def run(
                 console=console,
                 query=record.query,
             )
-        except GdrError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=exc.exit_code) from exc
+        except (ResearchFailedError, ResearchCancelledError) as exc:
+            # Still worth rendering: the transcript and metadata are the
+            # post-mortem. Synthesize a minimal interaction if a re-fetch
+            # is not possible.
+            failure = exc
+            fallback = (
+                STATUS_CANCELLED if isinstance(exc, ResearchCancelledError) else STATUS_FAILED
+            )
+            try:
+                latest = client.interactions.get(id=interaction_id)
+            except Exception:
+                latest = {"id": interaction_id, "status": fallback}
 
     target_dir = _choose_output_dir(record.output_dir, force=force)
     ctx = _build_context_from_record(record, output_dir=target_dir)
-    policy = SecurityPolicy(
-        output_root=config.output_dir,
-        safe_untrusted=config.safe_untrusted,
-        untrusted=False,
-    )
+    policy = SecurityPolicy(output_root=config.output_dir, untrusted=False)
 
+    # Prefer the interaction's own `updated` timestamp: resuming a run
+    # that finished yesterday must not report a 20-hour duration.
+    finished_at = _terminal_finish_time(latest) or datetime.now(_UTC)
     paths = write_artifacts(
         latest,
         ctx=ctx,
         output_dir=target_dir,
         policy=policy,
         started_at=record.created_at,
-        finished_at=datetime.now(_UTC),
+        finished_at=finished_at,
+        tools_summary=record.tools,
+    )
+
+    # Bring the local record up to date (status, finish time, tokens)
+    # while preserving fields only the original run knew (tools).
+    final_status = str(get_attr_or_key(latest, "status") or "unknown")
+    total_tokens = get_attr_or_key(get_attr_or_key(latest, "usage"), "total_tokens")
+    store.append(
+        record.model_copy(
+            update={
+                "status": final_status,
+                "finished_at": finished_at,
+                "total_tokens": total_tokens if total_tokens is not None else record.total_tokens,
+            }
+        )
     )
 
     console.print(f"[bold green]Resumed.[/bold green] artifacts -> {paths['report'].parent}")
+    if failure is not None or final_status != STATUS_COMPLETED:
+        console.print(f"[red]Note: the research ended with status {final_status}.[/red]")
+        if failure is not None:
+            code = failure.exit_code
+        elif final_status == STATUS_CANCELLED:
+            code = ResearchCancelledError.exit_code
+        else:
+            code = ResearchFailedError.exit_code
+        raise typer.Exit(code=code)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +185,25 @@ def _dir_is_empty_or_missing(path: Path) -> bool:
     except StopIteration:
         return True
     return False
+
+
+def _terminal_finish_time(interaction: Any) -> datetime | None:
+    """Best-effort completion time from the interaction's ``updated`` field.
+
+    The SDK models ``updated`` as a datetime; raw dict shapes may carry an
+    ISO string. Returns an aware datetime (naive values are assumed UTC),
+    or None when the field is absent or unparseable.
+    """
+    raw = get_attr_or_key(interaction, "updated")
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=_UTC)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=_UTC)
+    return None
 
 
 def _build_context_from_record(record: Record, *, output_dir: Path) -> RunContext:

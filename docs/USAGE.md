@@ -77,7 +77,7 @@ gdr research --file ~/Downloads/10k.pdf \
 # MCP server with Bearer auth
 gdr research \
   --mcp deploys=https://mcp.example.com \
-  --mcp-header 'deploys=Authorization:Bearer $DEPLOY_TOKEN' \
+  --mcp-header "deploys=Authorization:Bearer $DEPLOY_TOKEN" \
   "Summarize our last 10 production deploys"
 
 # Dry-run — see the request shape without calling the API
@@ -143,6 +143,7 @@ approval step.
 | Flag | Purpose |
 | --- | --- |
 | `-q / --query LABEL` | Label for the output directory slug (defaults to `approved-plan-<id6>`). |
+| `--max` | Execute with Deep Research Max (match how the plan was created). |
 | `--stream / --no-stream` | Toggle live streaming. |
 | `-o / --output DIR` | Exact output directory. |
 | `--dry-run` | Print the request body without calling the API. |
@@ -161,7 +162,7 @@ operation — no API calls.
 | Flag | Purpose |
 | --- | --- |
 | `-n / --limit N` | Maximum rows (most recent first). Default 20. |
-| `--status S` | Filter by status: `completed`, `failed`, `cancelled`, `in_progress`. |
+| `--status S` | Filter by status: `completed`, `failed`, `cancelled`, `incomplete`, `in_progress`. |
 | `--since DATE` | Filter by creation time. Accepts relative (`7d`, `24h`, `30m`, `2w`), dates (`YYYY-MM-DD`), and ISO 8601. |
 | `--full-id` | Show full interaction ids instead of truncated. |
 
@@ -185,7 +186,9 @@ run shares that prefix).
 | Flag | Purpose |
 | --- | --- |
 | `-p / --part {text,sources,metadata,transcript,images}` | Which artifact to render. Default `text` → prints `report.md`. |
-| `--config PATH` | Alternate config TOML. |
+
+Output is plain stdout (no wrapping), so `gdr show <id> > report.md`
+round-trips exactly.
 
 ### Examples
 
@@ -256,9 +259,26 @@ record, the lot.
 
 ### Flags
 
-Same execution-time flags as `gdr research` (see above), minus
-`--plan` (follow-ups skip planning — you already have the parent
-run's context).
+A subset of the `gdr research` flags: `--max`, `--model`,
+`--stream/--no-stream`, `-o/--output`, `--untrusted-input`,
+`--dry-run`, `--api-key`, `--no-confirm`, and `--config`. Tool and
+input flags (`--tool`, `--mcp`, `--file`, `--url`,
+`--file-search-store`, `--visualization`) are not available on
+follow-ups — the parent interaction's context carries over instead.
+There is no `--plan` (follow-ups skip planning).
+
+Two execution modes:
+
+* Default — re-runs the full Deep Research agent grounded in the
+  parent context (minutes, ~$1-3).
+* `--model gemini-3.1-pro-preview` — answers with a plain Gemini
+  model instead: fast and cheap, right for "elaborate on section 3"
+  clarifications. Mutually exclusive with `--max`; sends no research
+  tools.
+
+If the parent run executed in untrusted-input mode, the follow-up
+inherits that posture automatically (persisted in the local record);
+`--untrusted-input` forces it when no local record exists.
 
 ### Example
 
@@ -308,17 +328,19 @@ Resolution order: `$GDR_CONFIG_PATH` → `$XDG_CONFIG_HOME/gdr/config.toml`
 Print the full resolved config, or the value at a dot-separated path:
 
 ```bash
-gdr config get                          # full config
+gdr config get                          # full config (secrets redacted)
 gdr config get default_agent            # scalar
 gdr config get mcp_servers.factset.url  # nested
+gdr config get api_key --reveal         # print the actual secret
 ```
 
-Exit 4 if `KEY` doesn't resolve.
+Secrets (`api_key`, auth-like MCP headers) print as `[REDACTED]`
+unless `--reveal` is passed. Exit 4 if `KEY` doesn't resolve.
 
 ### `gdr config set KEY VALUE`
 
-Write a *top-level* scalar/list key into the config TOML. Types are
-inferred:
+Write a *top-level* scalar key into the config TOML (lists and
+nested tables need `gdr config edit`). Types are inferred:
 
 * `true` / `false` → bool
 * `42` → int
@@ -386,7 +408,7 @@ invocations can branch on these.
 | 2 | Research cancelled (`status=cancelled`) |
 | 3 | Research timed out (60-minute cap) |
 | 4 | Auth / config / validation error |
-| 5 | Network error after retries exhausted |
+| 5 | Network error (request failed, or polling failed 5x in a row) |
 | 130 | User Ctrl+C (task may still be running — resume with `gdr resume <id>`) |
 
 ---
@@ -422,7 +444,7 @@ All keys are optional; every one has a default.
 | `api_key` | string | `None` | Gemini API key. Accepts `env:VAR` to expand from environment. |
 | `default_agent` | string | `"deep-research-preview-04-2026"` | Agent used when `--max` is not set. |
 | `output_dir` | path | `~/gdr-reports` | Root for all artifact directories. |
-| `auto_open` | bool | `true` | Open the report in `$EDITOR` / `open` when done (TTY only). |
+| `auto_open` | bool | `true` | Open the finished report with the system opener (`open`/`xdg-open`) when stdout is a TTY. |
 | `confirm_max` | bool | `true` | Prompt before running Max agents. |
 | `default_tools` | list\[string\] | `["google_search", "url_context", "code_execution"]` | Tools enabled when no `--tool` flags are passed. |
 | `thinking_summaries` | `"auto"` or `"none"` | `"auto"` | Whether the agent produces thought summaries. |

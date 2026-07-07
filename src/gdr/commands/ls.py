@@ -15,13 +15,11 @@ elsewhere in Unix tooling.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from gdr.commands._common import open_store, parse_since
+from gdr.commands._common import friendly_errors, open_store, parse_since
 from gdr.core.models import Record
 from gdr.errors import ConfigError
 
@@ -30,6 +28,7 @@ _MAX_QUERY_CHARS = 60
 _DEFAULT_LIMIT = 20
 
 
+@friendly_errors
 def run(
     limit: int = typer.Option(
         _DEFAULT_LIMIT,
@@ -41,7 +40,7 @@ def run(
         None,
         "--status",
         help="Only show interactions with this status "
-        "(completed / failed / cancelled / in_progress).",
+        "(completed / failed / cancelled / incomplete / in_progress).",
     ),
     since: str | None = typer.Option(
         None,
@@ -54,13 +53,13 @@ def run(
         "--full-id",
         help="Print the full interaction id instead of a shortened version.",
     ),
-    config_path: Path | None = typer.Option(
-        None, "--config", help="Path to an alternate config TOML."
-    ),
 ) -> None:
-    """List recent research interactions."""
+    """List recent research interactions.
+
+    The store location comes from ``GDR_STATE_DIR`` / XDG env vars, not
+    the config file, so this command takes no ``--config`` flag.
+    """
     console = Console()
-    _ = config_path  # reserved for future filters (e.g. alternate state dirs)
 
     since_dt = None
     if since is not None:

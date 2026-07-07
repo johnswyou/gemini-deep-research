@@ -43,7 +43,7 @@ on these without parsing stderr.
 | 2 | Research cancelled | Run was cancelled (by user via `gdr cancel <id>` or externally). |
 | 3 | Research timed out | Hit the documented 60-minute cap on a task. |
 | 4 | Auth / config / validation error | Missing/invalid API key, malformed TOML, unknown flag value, bad MCP header, etc. |
-| 5 | Network error after retries | Exhausted the retry budget for 429/5xx responses. |
+| 5 | Network error | A request failed, or polling failed 5 times in a row (polls retry with backoff first). |
 | 130 | User interrupt (Ctrl+C) | Stream or poll was interrupted. Task may still be running — `gdr resume <id>`. |
 
 ---

@@ -25,7 +25,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from gdr.commands._common import lookup_record, open_store
+from gdr.commands._common import friendly_errors, lookup_record, open_store
 from gdr.core.models import Record
 from gdr.core.persistence import Store
 
@@ -38,25 +38,36 @@ class Part(str, Enum):
     images = "images"
 
 
+@friendly_errors
 def run(
     interaction_id: str = typer.Argument(
         ..., help="Interaction id (full or first-N unique prefix)."
     ),
     part: Part = typer.Option(Part.text, "--part", "-p", help="Which artifact to render."),
-    config_path: Path | None = typer.Option(
-        None, "--config", help="Path to an alternate config TOML."
-    ),
 ) -> None:
-    """Print a saved artifact from a prior research run."""
+    """Print a saved artifact from a prior research run.
+
+    Output goes through plain stdout (no Rich styling or wrapping) so it
+    can be piped: ``gdr show <id> > report.md`` round-trips byte-for-byte.
+    """
     console = Console()
-    _ = config_path  # reserved for future remote-backed stores
 
     store = open_store()
     record = lookup_record(store, interaction_id)
     if record is None:
         # Try prefix match as a convenience — 'gdr show intabc' works
         # when the interaction was 'intabcxyz123'.
-        record = _find_by_prefix(store, interaction_id)
+        matches = _find_by_prefix(store, interaction_id)
+        if len(matches) == 1:
+            record = matches[0]
+        elif len(matches) > 1:
+            shown = ", ".join(r.id for r in matches[:5])
+            console.print(
+                f"[red]Prefix {interaction_id!r} matches {len(matches)} records:[/red] "
+                f"{shown}{'…' if len(matches) > 5 else ''}\n"
+                f"Use more characters of the id."
+            )
+            raise typer.Exit(code=4)
 
     if record is None:
         console.print(
@@ -97,9 +108,9 @@ def _print_text_file(console: Console, path: Path) -> None:
     if not path.is_file():
         console.print(f"[yellow]Missing file:[/yellow] {path}")
         raise typer.Exit(code=4)
-    # `highlight=False, markup=False` so Markdown back-ticks and square
-    # brackets in the report don't trip Rich's markup parser.
-    console.print(path.read_text(encoding="utf-8"), highlight=False, markup=False)
+    # typer.echo, not console.print: Rich hard-wraps at terminal width
+    # (80 on pipes), which would corrupt the report when redirected.
+    typer.echo(path.read_text(encoding="utf-8"), nl=False)
 
 
 def _print_json_file(console: Console, path: Path) -> None:
@@ -111,7 +122,8 @@ def _print_json_file(console: Console, path: Path) -> None:
     except json.JSONDecodeError as exc:
         console.print(f"[red]Could not parse {path}:[/red] {exc}")
         raise typer.Exit(code=4) from exc
-    console.print_json(json.dumps(payload, sort_keys=True))
+    # Plain stdout so `gdr show --part sources > x.json` stays valid JSON.
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _print_images(console: Console, output_dir: Path) -> None:
@@ -124,16 +136,10 @@ def _print_images(console: Console, output_dir: Path) -> None:
         console.print("[dim]No images were generated for this run.[/dim]")
         return
     for path in files:
-        console.print(str(path))
+        # One unwrapped path per line — shell-loop friendly.
+        typer.echo(str(path))
 
 
-def _find_by_prefix(store: Store, prefix: str) -> Record | None:
-    """Return the single record whose id starts with ``prefix``.
-
-    If zero or multiple records match, we return ``None`` — the caller
-    will already emit the "no record" error in that case.
-    """
-    candidates = [r for r in store.recent() if r.id.startswith(prefix)]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+def _find_by_prefix(store: Store, prefix: str) -> list[Record]:
+    """Return every record whose id starts with ``prefix``."""
+    return [r for r in store.recent() if r.id.startswith(prefix)]

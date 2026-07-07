@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from gdr.errors import (
+    NetworkError,
     ResearchCancelledError,
     ResearchFailedError,
     ResearchTimedOutError,
@@ -144,3 +145,64 @@ class TestPollUntilComplete:
             get, "abc", clock=FakeClock(step_seconds=1.0), sleep=_noop_sleep
         )
         assert result["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure retry (2026-07 review: one blip must not kill a run)
+# ---------------------------------------------------------------------------
+
+
+class TestPollRetry:
+    def test_transient_failures_then_success(self) -> None:
+        calls = {"n": 0}
+
+        def flaky_get(*, id: str) -> Any:
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise ConnectionError("blip")
+            return SimpleNamespace(id=id, status="completed")
+
+        retries: list[int] = []
+        result = poll_until_complete(
+            flaky_get,
+            "int-1",
+            on_transient_error=lambda n, _exc: retries.append(n),
+            clock=FakeClock(),
+            sleep=_noop_sleep,
+        )
+        assert result.status == "completed"
+        assert retries == [1, 2]
+
+    def test_consecutive_failures_exhaust_to_network_error(self) -> None:
+        def always_fails(*, id: str) -> Any:
+            raise ConnectionError("down")
+
+        with pytest.raises(NetworkError) as excinfo:
+            poll_until_complete(always_fails, "int-2", clock=FakeClock(), sleep=_noop_sleep)
+        message = str(excinfo.value)
+        assert "gdr resume int-2" in message
+        assert "gdr status int-2" in message
+
+    def test_failure_counter_resets_after_success(self) -> None:
+        # 4 failures, one success, 4 more failures: never reaches the cap of 5.
+        script = ["fail"] * 4 + ["ok"] + ["fail"] * 4 + ["done"]
+        state = {"i": 0}
+
+        def scripted_get(*, id: str) -> Any:
+            action = script[min(state["i"], len(script) - 1)]
+            state["i"] += 1
+            if action == "fail":
+                raise ConnectionError("blip")
+            if action == "ok":
+                return SimpleNamespace(id=id, status="in_progress")
+            return SimpleNamespace(id=id, status="completed")
+
+        result = poll_until_complete(scripted_get, "int-3", clock=FakeClock(), sleep=_noop_sleep)
+        assert result.status == "completed"
+
+    def test_incomplete_status_is_terminal(self) -> None:
+        # `incomplete` (google-genai 1.73 status) must not poll forever.
+        get = StatusScript(["in_progress", "incomplete"])
+        result = poll_until_complete(get, "int-4", clock=FakeClock(), sleep=_noop_sleep)
+        assert result.status == "incomplete"
+        assert get.calls == 2

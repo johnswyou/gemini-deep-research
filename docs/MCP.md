@@ -17,7 +17,7 @@ If you want a runnable example, see
 # One-shot: attach an MCP server for a single run
 gdr research \
   --mcp deploys=https://mcp.example.com \
-  --mcp-header 'deploys=Authorization:Bearer $DEPLOY_TOKEN' \
+  --mcp-header "deploys=Authorization:Bearer $DEPLOY_TOKEN" \
   "Summarize our last 10 production deploys"
 ```
 

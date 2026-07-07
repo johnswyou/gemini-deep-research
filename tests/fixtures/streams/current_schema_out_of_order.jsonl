@@ -1,0 +1,6 @@
+{"event_type": "interaction.created", "interaction": {"id": "int-cur-ooo-002", "status": "in_progress"}, "event_id": "evt-001"}
+{"event_type": "step.delta", "index": 0, "delta": {"type": "text", "text": "Delta arrived without a preceding step.start."}, "event_id": "evt-002"}
+{"event_type": "step.start", "index": 0, "step": {"type": "model_output"}, "event_id": "evt-003"}
+{"event_type": "step.delta", "index": 0, "delta": {"type": "text", "text": " Subsequent chunks still append."}, "event_id": "evt-004"}
+{"event_type": "step.stop", "index": 0, "event_id": "evt-005"}
+{"event_type": "interaction.completed", "interaction": {"id": "int-cur-ooo-002", "status": "completed"}, "event_id": "evt-006"}

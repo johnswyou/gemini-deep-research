@@ -21,10 +21,13 @@ gdr research --plan "Competitive landscape of EV batteries: incumbents vs. new e
 
 # --- Cross-session variant ---
 #
-# You can also iterate on a plan across terminal sessions. First
-# create the plan and capture its id:
+# You can also iterate on a plan across terminal sessions. Start a
+# planned run, review the plan, and answer C (cancel) at the prompt —
+# gdr prints the plan id so you can come back to it:
 #
-#   plan_id=$(gdr research --plan "EV batteries" <<< "C" | grep -oE 'plan-[a-z0-9-]+' | head -1)
+#   gdr research --plan "EV batteries"
+#   # ... review plan, answer C ...
+#   # Plan kept for later:  gdr plan approve <plan_id>
 #
 # Then refine later:
 #

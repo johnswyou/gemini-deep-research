@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `gdr follow-up --model <id>` answers follow-ups with a plain Gemini
+  model (e.g. `gemini-3.1-pro-preview`) instead of re-running a Deep
+  Research agent — faster and far cheaper for clarification questions.
+  Mutually exclusive with `--max`; sends `model=` on the wire with no
+  `agent_config` and no research tools.
+- Follow-ups inherit the parent run's untrusted-input posture (the
+  local record now persists it) and accept `--untrusted-input` to
+  force the stricter mode explicitly.
+- Dropped SSE streams now re-attach via
+  `interactions.get(id=..., stream=True, last_event_id=...)` up to 3
+  times before falling back to polling, so streamed output survives
+  transient disconnects. Token usage reported on the stream's
+  completion event is kept when the terminal fetch omits usage.
+- SDK contract tests: gdr's `create()`/`get()` kwargs are validated
+  against the installed google-genai signatures, and the response
+  adapter against real SDK response types (`Interaction`,
+  `TextContent`, `ThoughtContent`, `Usage`) — the class of drift
+  behind v0.1.1/v0.1.2 now fails in CI instead of in production.
+- An opt-in live smoke test (`RUN_LIVE_TESTS=1 pytest -m live`) proves
+  the create/poll/normalize pipeline against the real API using a
+  cheap plain model; the `live` marker gate promised by the test
+  config is now actually implemented.
+- Streamed images keep the MIME type observed on the wire instead of
+  assuming PNG; the streaming status line's elapsed timer now ticks
+  during quiet stretches between events.
+- `gdr resume` reports honest durations (using the interaction's
+  `updated` timestamp instead of the resume wall clock) and preserves
+  the original run's tools list in `metadata.json` under `--force`.
+- A warning is printed when an MCP server uses plain `http://` with
+  auth headers (credentials would travel unencrypted), and
+  `gdr config set` tightens the config file to `0600` and nudges
+  literal `api_key` values toward the `env:` form.
+- Current-schema golden stream fixtures for error, out-of-order, and
+  disconnect cases (parity with the legacy-schema fixtures).
+
+### Security
+
+- CI and release workflow actions are pinned to commit SHAs (the
+  release workflow holds PyPI trusted-publishing permissions).
+
+### Fixed
+
+- Non-streaming runs, `gdr resume`, `gdr plan`, and `gdr status` now
+  render responses whose outputs arrive under `steps[].content[]` (or
+  as SDK content objects) via a single response normalizer — previously
+  only the streamed happy path survived an empty `outputs` fetch.
+- `gdr research --output DIR` with a directory outside the configured
+  `output_dir` no longer completes the (paid) run and then crashes at
+  render time: explicit `--output` paths are honored verbatim, while
+  derived paths remain confined to `output_dir`.
+- A run is recorded in the local store as soon as its interaction id is
+  known (status `in_progress`), so `gdr ls` / `gdr status` /
+  `gdr resume` now work after Ctrl+C, timeouts, and crashes — not just
+  after clean completions. Ctrl+C prints a resume hint and exits 130.
+- Runs that end `failed` / `cancelled` / `incomplete` now exit 1 / 2 / 1
+  (previously a fast failure exited 0) while still writing metadata and
+  transcript artifacts for post-mortems; failure details are captured
+  in `metadata.json` when the API provides them.
+- Malformed config files and other configuration errors print a
+  one-line message and exit 4 in every command instead of a traceback.
+- Polling now retries transient network failures with backoff (up to 5
+  consecutive attempts) instead of abandoning a running task on the
+  first blip; exhaustion exits 5 with reattach instructions.
+- `interactions.create()` requests now send `store=true` explicitly and
+  `incomplete` is recognized as a terminal status (no more polling it
+  for the full 60-minute cap).
+- Embedded `env:VAR` references in config values now expand
+  (`"Bearer env:TOKEN"` works as documented); unset variables are a
+  config error instead of being sent as literal text.
+- Config-declared `[mcp_servers.*]` entries are actually attached to
+  research runs (CLI `--mcp` flags win on name collision).
+- `auto_open = true` now opens the finished report (TTY only) — the key
+  previously did nothing.
+- `gdr show` prints reports, JSON artifacts, and image paths through
+  plain stdout instead of Rich, so piped output is no longer wrapped
+  (and corrupted) at 80 columns; ambiguous id prefixes now say so
+  instead of claiming no record exists.
+- `gdr plan approve` gained `--max`; approving a Max plan no longer
+  silently downgrades to the default agent. Cancelling an interactive
+  plan review prints the plan id for later `gdr plan refine/approve`.
+- `gdr doctor` actually compares the installed google-genai version
+  against the required minimum (previously any importable version
+  passed) and shares the key fingerprint / config template with the
+  rest of the CLI.
+- `gdr config get` redacts `api_key` and auth-like MCP header values
+  unless `--reveal` is passed; scalar values print unwrapped for shell
+  capture. `gdr resume` updates the stored record's status/tokens.
+- Metadata usage now reads the SDK's `total_input_tokens` /
+  `total_output_tokens` spellings; unrecognized plan-prompt input
+  re-prompts instead of approving; `--file` inputs over ~20 MB are
+  rejected up front with a pointer to File Search; `--url` guarantees
+  the `url_context` tool even when config narrows `default_tools`.
+
+### Removed
+
+- Unused `platformdirs` and `httpx` dependencies; dead `ls`/`show`
+  `--config` no-op flags; vestigial internal helpers.
+
 ## [0.1.2] - 2026-05-25
 
 ### Fixed

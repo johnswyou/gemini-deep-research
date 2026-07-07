@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gdr.cli import app
+from gdr.constants import AGENT_MAX
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers (isolation + SDK mock)
@@ -272,3 +273,46 @@ class TestHelp:
     def test_approve_help(self, runner: CliRunner) -> None:
         result = runner.invoke(app, ["plan", "approve", "--help"])
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# approve --max (2026-07 review: approval silently downgraded the agent)
+# ---------------------------------------------------------------------------
+
+
+class TestApproveMax:
+    def test_approve_max_selects_max_agent(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        completed = SimpleNamespace(
+            id="intapproved1",
+            status="completed",
+            outputs=[SimpleNamespace(type="text", text="Report.", annotations=[])],
+            usage=None,
+        )
+        fake_interactions = MagicMock()
+        fake_interactions.create.return_value = completed
+        fake_interactions.get.return_value = completed
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            [
+                "plan",
+                "approve",
+                "plan-123",
+                "--max",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert fake_interactions.create.call_args.kwargs["agent"] == AGENT_MAX
+        assert fake_interactions.create.call_args.kwargs["previous_interaction_id"] == "plan-123"

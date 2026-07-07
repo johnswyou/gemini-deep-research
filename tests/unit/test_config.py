@@ -30,9 +30,26 @@ def test_env_expansion_passes_through_plain_strings() -> None:
     assert _expand_env_string("", env={}) == ""
 
 
-def test_env_expansion_does_not_expand_midstring() -> None:
-    # Only the leading `env:` prefix is special; embedded tokens pass through.
-    assert _expand_env_string("hi env:X", env={"X": "y"}) == "hi env:X"
+def test_env_expansion_expands_embedded_tokens() -> None:
+    # Embedded `env:VAR` tokens expand in place — this is the documented
+    # `headers.Authorization = "Bearer env:TOKEN"` form.
+    assert _expand_env_string("hi env:X", env={"X": "y"}) == "hi y"
+    assert (
+        _expand_env_string("Bearer env:TOKEN trailer", env={"TOKEN": "abc"}) == "Bearer abc trailer"
+    )
+
+
+def test_env_expansion_embedded_requires_word_boundary_and_identifier() -> None:
+    # Not an identifier after `env:` → left alone (ports, etc.).
+    assert _expand_env_string("https://env:8080/x", env={}) == "https://env:8080/x"
+    # `env:` glued to a preceding word is not a reference.
+    assert _expand_env_string("myenv:X", env={"X": "y"}) == "myenv:X"
+
+
+def test_env_expansion_embedded_errors_when_variable_missing() -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        _expand_env_string("Bearer env:NOPE", env={})
+    assert "NOPE" in str(excinfo.value)
 
 
 def test_env_expansion_strips_whitespace_in_var_name() -> None:
@@ -162,10 +179,8 @@ def test_load_config_expands_nested_mcp_headers(tmp_path: Path) -> None:
     cfg = load_config(path=path, env={"FACTSET_TOKEN": "secret-token-1234"})
     server = cfg.mcp_servers["factset"]
     assert server.url == "https://mcp.factset.com"
-    # env:FACTSET_TOKEN inside a longer Bearer string does NOT get expanded
-    # because we only expand values starting with `env:`. Values that need a
-    # secret should be `env:VAR` alone. This documents that semantic.
-    assert server.headers["Authorization"] == "Bearer env:FACTSET_TOKEN"
+    # The documented `Bearer env:VAR` form expands in place.
+    assert server.headers["Authorization"] == "Bearer secret-token-1234"
 
 
 def test_load_config_expands_full_env_header(tmp_path: Path) -> None:

@@ -13,10 +13,11 @@ APP_DESCRIPTION: Final[str] = (
 # See https://ai.google.dev/gemini-api/docs/deep-research#supported-versions
 AGENT_FAST: Final[str] = "deep-research-preview-04-2026"
 AGENT_MAX: Final[str] = "deep-research-max-preview-04-2026"
-KNOWN_AGENTS: Final[tuple[str, ...]] = (AGENT_FAST, AGENT_MAX)
 
-# Minimum google-genai SDK version that supports `client.interactions.*`.
-MIN_GENAI_VERSION: Final[str] = "1.55.0"
+# Minimum google-genai SDK version that speaks the current (post-May-2026)
+# Interactions API schema. The legacy schema emitted by 1.x SDKs is rejected
+# server-side with a 400 ("upgrade to >= 2.0.0"), so 2.0.0 is a hard floor.
+MIN_GENAI_VERSION: Final[str] = "2.0.0"
 
 # Deep Research documents a 60 minute upper bound per task.
 MAX_RESEARCH_SECONDS: Final[int] = 60 * 60
@@ -46,11 +47,23 @@ ALL_TOOLS: Final[tuple[str, ...]] = SIMPLE_TOOLS + CONFIGURED_TOOLS
 # Default tool set when the user doesn't pass `--tool` flags.
 DEFAULT_TOOLS: Final[tuple[str, ...]] = SIMPLE_TOOLS
 
-# Terminal interaction statuses.
+# Interaction statuses (google-genai 2.x models the full set:
+# in_progress / requires_action / completed / failed / cancelled / incomplete /
+# budget_exceeded). `budget_exceeded` was added in the 2.x schema — the agent
+# stopped because it hit a budget cap, which is terminal (a partial report may
+# still be present).
 STATUS_COMPLETED: Final[str] = "completed"
 STATUS_FAILED: Final[str] = "failed"
 STATUS_CANCELLED: Final[str] = "cancelled"
+STATUS_INCOMPLETE: Final[str] = "incomplete"
+STATUS_BUDGET_EXCEEDED: Final[str] = "budget_exceeded"
 STATUS_IN_PROGRESS: Final[str] = "in_progress"
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
+    {
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+        STATUS_CANCELLED,
+        STATUS_INCOMPLETE,
+        STATUS_BUDGET_EXCEEDED,
+    }
 )

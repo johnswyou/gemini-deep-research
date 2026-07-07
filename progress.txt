@@ -23,6 +23,47 @@ the Gemini Interactions API. Binary name: `gdr`. Package: `gemini-deep-research`
 Read this section BEFORE editing. Rules discovered the hard way — don't
 re-learn them.
 
+### google-genai 2.x Interactions API (post-May-2026 schema) - LOAD-BEARING
+- **Floor is `google-genai>=2.0.0`.** The Interactions API had a breaking
+  schema change in May 2026; 1.x SDKs emit a wire shape the backend now
+  rejects with a 400 ("upgrade to >= 2.0.0"). `MIN_GENAI_VERSION` and
+  `core/client._require_supported_sdk()` enforce it. Agent names
+  (`deep-research-preview-04-2026` / `-max-`) and the follow-up model
+  (`gemini-3.1-pro-preview`) are still current as of 2026-07.
+- **Responses use `steps[]`, not `outputs`.** A completed `Interaction`
+  has `output_text` + `steps[]` of typed step objects: `ModelOutputStep`
+  (`content: [TextContent|ImageContent]` - THE report body), `ThoughtStep`
+  (`summary`/`signature`, NO `content`), tool steps (`GoogleSearchCallStep`,
+  `FunctionCallStep`, ... - no `content`), and a `user_input` step
+  (`get(id)` returns the full timeline). `normalize.py` extracts body text
+  ONLY from `model_output` steps (`_BODY_STEP_TYPES`) so user_input/tool
+  text never leaks into report.md; legacy `outputs` items (step_type None)
+  stay body for back-compat.
+- **Plain models reject `background=True`** ("Model '...' does not support
+  background interactions"). `build_create_kwargs` sends `background=False`
+  on the `model=` branch (--model follow-ups, smoke); Deep Research agents
+  keep `background=True` + `store=True`.
+- **Citations** are `{type:"url_citation", url, title, start/end_index}`;
+  **usage** is `total_input_tokens`/`total_output_tokens`/`total_tokens`
+  (+ thought/cached/tool). Status Literal gained `budget_exceeded`
+  (terminal) + an `UnrecognizedStr` fallback; `Interaction.created`/
+  `updated` are ISO strings (not datetime).
+- **Types live in `google.genai.interactions`** (Interaction, the `Step`
+  Union + concrete `ModelOutputStep`/`ThoughtStep`/..., TextContent,
+  ImageContent, URLCitation, Usage, DeepResearchAgentConfig). `create()`
+  is `**body` (VAR_KEYWORD) - validate kwargs against
+  `CreateAgentInteractionParam`/`CreateModelInteractionParam` TypedDict
+  keys, NOT the signature. `get(id=...)`/`cancel(id=...)` take positional
+  `id`. `ThoughtContent` was removed (-> `ThoughtSummaryContent`).
+- **streaming.py & rendering.py were forward-written to this schema** (SSE
+  `step.delta`/`interaction.completed`, `url_citation`, `total_*_tokens`),
+  so the migration was mostly a version bump + the background fix + the
+  body-leak tightening.
+- **Testing Ctrl+C:** a process launched with `&` from a non-interactive
+  script inherits `SIGINT=SIG_IGN` (Python keeps an inherited ignore), so
+  SIGINT tests do nothing. Use `set -m` (job control) so the background job
+  gets default SIGINT, then `kill -INT -<pgid>` triggers KeyboardInterrupt.
+
 ### Tooling / lint
 - **Ruff bugbear B008:** Typer's `typer.Option(...)` / `typer.Argument(...)`
   in default values trip B008. Fixed via
@@ -62,6 +103,29 @@ re-learn them.
   `Any` generically.
 
 ### Domain architecture
+- **`core/normalize.py` is THE response adapter.** All readers of a
+  completed interaction (rendering, planning, status, resume) go
+  through `normalized_outputs()` / `raw_output_items()` — never read
+  `interaction.outputs` directly. It bridges SDK objects, dicts, and
+  the docs' `steps[].content[]` shape, and flattens ThoughtContent's
+  list-of-TextContent `summary`. `get_field()` there is the ONE
+  attr-then-key helper (re-exported as `_common.get_attr_or_key`).
+- **Every Typer command is wrapped in `_common.friendly_errors`.**
+  Uncaught GdrError -> one-line message + documented exit code. New
+  commands MUST add the decorator (below @app.command when using
+  sub-app decorators). Raise NetworkError instead of
+  `typer.Exit(code=5)`.
+- **Records are written twice per run:** in_progress right after the
+  interaction id is known, terminal at the end. JsonlStore.append is
+  last-write-wins per id. Never move `_record_run` back behind
+  write_artifacts only.
+- **Confinement is allocation-time policy:** derived output dirs are
+  confined in `_allocate_output_dir`; explicit `--output` is exempt;
+  `write_artifacts` never confines.
+- **poll_until_complete retries transient errors** (5 consecutive max,
+  capped backoff) and treats `incomplete` as terminal. Don't add
+  retries at call sites.
+
 - **`execute_research()` is the shared execution pipeline.** Both
   `gdr research` (with/without `--plan`) and `gdr plan approve` call it.
   Do NOT duplicate create/poll/render logic. The function accepts
@@ -1436,4 +1500,236 @@ overwritten. Hence the RC-first habit for anything risky.
     will be. Add a bullet to `[Unreleased]` with each user-facing
     change so you're not reconstructing the release notes from
     `git log` when the time comes.
+---
+
+## 2026-07-07 - Deep code review (full repo)
+- Produced CODE_REVIEW.md at repo root: full-repo review (architecture,
+  correctness, code quality, tests, docs, packaging, CI) against the
+  current Deep Research API docs. No source changes - review only.
+- Verified gates: ruff lint + format clean, mypy strict clean, BUT the
+  test suite is NOT green on a clean checkout: 353 passed, 1 failed
+  (test_show_command.py::test_images_part_lists_files - Rich wraps the
+  long tmp path at width 80 and splits "image_001.png" mid-name).
+- Empirically reproduced the top finding: `gdr research --output <dir>`
+  with dir outside config output_dir completes the (paid) run, then
+  dies on an UNHANDLED ConfigError from write_artifacts' policy.confine
+  (exit 1, no artifacts, no record, unresumable).
+- Files changed: CODE_REVIEW.md (new), progress.txt (this entry).
+- **Learnings for future iterations:**
+  - The v0.1.2 hotfix premise ("final fetch is empty") implies ALL
+    non-stream readers of `.get().outputs` are still broken: rendering
+    (--no-stream + every non-TTY run), resume, plan text extraction,
+    status last-thought, and sources.json. Fix belongs in ONE response
+    adapter, not per-caller fallbacks.
+  - Records are appended only after successful render
+    (research.py:_finalize_and_render), so resume/ls/timeout-hint can
+    never serve interrupted/failed/timed-out runs. Append an
+    in_progress record right after create() returns an id -
+    JsonlStore.append is already last-write-wins per id.
+  - There is NO outer GdrError->exit-code boundary despite errors.py
+    claiming one; load_config raises tracebacks in most commands, and
+    exit code 5 is a magic number at 7 call sites (NetworkError is
+    never raised).
+  - `_resolve_agent` has a dead if-branch (both arms return
+    config.default_agent) and no test asserts --max selects AGENT_MAX
+    on the wire - one typo away from silently shipping the wrong agent.
+  - Config `[mcp_servers.*]` tables are parsed but never merged into
+    any request; `auto_open` is threaded into RunContext but never
+    read. Both are documented features.
+  - Machine-readable output MUST use typer.echo, not console.print -
+    `gdr show` (report text + image paths) violates this and corrupts
+    piped output at width 80; this is what broke the test above.
+  - env: expansion is prefix-only, but every doc/template example uses
+    "Bearer env:TOKEN" (mid-string) which silently doesn't expand -
+    and test_config.py asserts the broken behavior as intended.
+---
+
+## 2026-07-07 - Review remediation (P0/P1 fixes from CODE_REVIEW.md)
+- Fixed, with tests, the review's priority list on the PR #3 branch:
+  1. Response adapter `core/normalize.py` (outputs | steps[].content[] |
+     SDK objects) wired into rendering/planning/status/resume; thought
+     summary list flattening; usage total_input/output_tokens spellings;
+     metadata gains "error" field.
+  2. Record lifecycle: in_progress record at create-time + terminal
+     update; Ctrl+C -> resume hint + exit 130 (stream + poll phases).
+  3. --output contract: explicit override exempt from confinement
+     (was: paid run then unhandled crash); write_artifacts no longer
+     confines; resume unaffected by config.output_dir changes.
+  4. friendly_errors boundary on every command; NetworkError replaces
+     7 magic exit-5 sites; malformed config -> exit 4 one-liner.
+  5. Terminal-status handling: failed->1 / cancelled->2 / incomplete->1
+     with artifacts+record always written; poll retry with backoff
+     (5 consecutive, 30s cap); `incomplete` added to TERMINAL_STATUSES.
+  6. store=True sent explicitly (SDK 1.73 create() accepts it).
+  7. Config features wired: [mcp_servers.*] merged into every run (CLI
+     wins by name), auto_open via typer.launch (TTY-gated), embedded
+     "Bearer env:TOKEN" expansion (word-boundary regex; unset var =
+     ConfigError).
+  8. UX: gdr show via typer.echo (pipe-safe; fixes the red test),
+     ambiguous-prefix message, plan approve --max, plan cancel prints
+     plan id, plan prompt re-prompts on garbage, doctor compares SDK
+     version for real, config get redacts secrets (--reveal opt-out),
+     --file 20MB guard, --url guarantees url_context with narrowed
+     config tools.
+  9. Dead code removed: NetworkError now raised; output_subdir,
+     SecurityPolicy.safe_untrusted field, KNOWN_AGENTS,
+     default_agent_config, _SENTINEL, _loaded, dead ls/show --config
+     flags, platformdirs+httpx deps (uv.lock regenerated), duplicate
+     templates/fingerprints/tty-checks consolidated.
+- Tests: 354 -> 403 (test_normalize.py, test_research_regressions.py,
+  retry/flush/redaction/version/approve-max/resume-record additions);
+  4 old tests updated (they asserted the broken behaviors); ruff +
+  format + mypy strict + pytest all green.
+- Verified end-to-end: malformed config exits 4 cleanly; the
+  --output-outside-root repro now completes and writes artifacts.
+- Files changed: src/gdr/** (19 files), tests (12 files), pyproject,
+  uv.lock, docs/USAGE.md, docs/MCP.md, docs/TROUBLESHOOTING.md,
+  examples/02+05, CHANGELOG.md, progress.txt.
+- **Learnings for future iterations:**
+  - google-genai 1.73.1 introspection: Interaction.outputs IS the field
+    (typed content items); status set includes requires_action and
+    incomplete; create() accepts store=; get() accepts last_event_id +
+    stream (SSE reconnect possible later); Usage uses
+    total_input_tokens/total_output_tokens; ThoughtContent.summary is
+    list[TextContent]. SDK's typed SSE events are the OLD schema
+    (interaction.start/content.*) - keep the dual-schema aggregator.
+  - functools.wraps decorators work fine on Typer commands (typer uses
+    inspect.signature which follows __wrapped__); place them BELOW
+    @app.command(...) so registration sees the wrapper.
+  - Tests that certify broken behavior are the expensive kind of drift:
+    4 of the 4 test failures during remediation were tests asserting
+    the bug (env: mid-string non-expansion, write-time confinement,
+    output_subdir). When fixing a reviewed defect, search tests for its
+    blessing first.
+  - CliRunner + friendly_errors: result.output includes stderr; assert
+    exit codes and message text, and `result.exception is None or
+    SystemExit` to prove no traceback leaked.
+---
+
+## 2026-07-07 - Follow-up round (deferred review items)
+- `gdr follow-up --model <id>`: plain-model follow-ups send `model=` on
+  the wire with NO agent/agent_config/tools (matches the docs' cheap
+  clarification example). Mutually exclusive with --max. RunContext
+  gained `model: str | None`; build_create_kwargs branches on it.
+- Untrusted posture inheritance: Record persists `untrusted`; follow-up
+  looks up the parent record and inherits the posture (with a visible
+  note); follow-up also gained an explicit --untrusted-input flag.
+- SSE reconnect: aggregator tracks `last_event_id` from every event;
+  stream_with_live_ui re-attaches via
+  get(id=..., stream=True, last_event_id=...) up to 3 times before the
+  disconnect fallback. Reconnect failures (old SDK without the param,
+  API error, non-iterable result) degrade gracefully via iter() inside
+  the guard. Streamed usage (completion event) survives an empty fetch
+  into record + metadata.
+- tests/unit/test_sdk_contract.py: kwargs contract vs REAL SDK
+  signatures (create agent-shape + model-shape, get id/stream/
+  last_event_id, cancel), AgentConfig fields vs DeepResearchAgentConfig,
+  and the adapter/renderer driven by real Interaction/TextContent/
+  ThoughtContent/ImageContent/Usage instances. Plus a canary asserting
+  gdr knows every status in the SDK's Literal.
+- Workflows: actions pinned to commit SHAs (checkout v4 -> 34e11487...,
+  setup-uv v3 -> caf0cab7..., pypi-publish release/v1 -> cef22109...).
+  Note: release.yml had already replaced softprops with `gh release
+  create` - only three actions needed pinning.
+- Tests: 403 -> 424. ruff/format/mypy strict/pytest all green.
+- **Learnings for future iterations:**
+  - The container proxy scopes api.github.com to session repos (curl
+    gets a 404-ish policy message); WebFetch is the way to read public
+    GitHub metadata (e.g. action tag SHAs) from this environment.
+  - MagicMock supports iter() by default BUT configured return_values
+    (SimpleNamespace) don't - reconnect-style code must iter() inside
+    its own try/except to degrade on non-iterable results.
+  - `nonlocal x` in a closure requires the binding to appear before the
+    def in the enclosing scope for mypy (runtime is laxer).
+  - genai.Client(api_key=...) constructs offline; client.interactions
+    emits an "experimental" UserWarning - fine to leave visible in the
+    contract tests as a version-drift signal.
+---
+
+## 2026-07-07 - Polish round (remaining minor review items)
+- conftest.py now implements the RUN_LIVE_TESTS gate it always claimed;
+  new opt-in live smoke test (tests/test_live_smoke.py) drives
+  create/poll/normalize against the real API with gemini-2.5-flash-lite
+  (cents, seconds) - validates store=True + response shape live.
+- Streamed image MIME capture: aggregator records mime from step.start
+  content and image deltas (AggregatedSnapshot.image_mimes parallel
+  list); snapshot_outputs no longer hardcodes image/png.
+- Resume fidelity: finished_at from the interaction's `updated` field
+  (SDK datetime or ISO string, naive=UTC) so durations are honest;
+  write_artifacts/build_metadata accept tools_summary so --force
+  resume keeps the record's original tools in metadata.json.
+- Plaintext-MCP warning in execute_research (http:// + headers);
+  config set chmod 0600 + env: hint for literal api_key values.
+- Live-ticking stream timer: console.status now gets a _LiveStatusText
+  renderable whose __rich__ recomputes the line per refresh tick -
+  the elapsed display no longer freezes between events (dropped the
+  per-event .update() nudges).
+- Current-schema golden fixtures: mid_stream_error / out_of_order /
+  disconnect_mid_text now exist in both event schemas with tests
+  (including last_event_id assertion on the disconnect fixture).
+- Tests 424 -> 436 (+1 gated live). ruff/format/mypy strict green.
+- **Learnings for future iterations:**
+  - console.status accepts any renderable; an object with __rich__
+    gets re-rendered by the refresh thread ~12x/s - the cheap way to
+    get live-updating status text without an update() call site.
+  - pytest_collection_modifyitems + item.keywords is the right hook
+    for env-gated markers; keep the skip reason actionable.
+  - zip(strict=False) is required by ruff B905 on py310-compatible
+    code even when the length mismatch is handled by padding.
+---
+
+## 2026-07-07 - Migrate to google-genai 2.x Interactions API (live-validated)
+- **Blocker found by live validation (PR #3 handoff Part C).** The first
+  live `create()` returned 400 "The legacy Interactions API schema is no
+  longer supported. Please upgrade ... to version >= 2.0.0" - a May-2026
+  breaking change. The whole 1.73.1 integration was rejected server-side.
+  Root cause: PR #3's adapter (normalize/rendering/streaming) was
+  forward-written to the new schema but could never be live-tested on
+  1.73.1, which physically can't emit the new wire shape.
+- **Migration (10 files, +209/-66):**
+  - `pyproject.toml` `google-genai>=2.0.0` + `uv lock` -> 2.10.0.
+  - `constants.py`: `MIN_GENAI_VERSION` -> 2.0.0; add `budget_exceeded`
+    terminal status.
+  - `core/requests.py`: `model=` branch sends `background=False` (plain
+    models reject background interactions in 2.x).
+  - `core/normalize.py`: report body from `model_output` steps only
+    (`_BODY_STEP_TYPES`) so the full 2.x timeline (user_input, thoughts,
+    tool steps) can't leak into report.md.
+  - `core/rendering.py`: transcript captures the full `steps` timeline.
+  - `core/client.py`: fail fast with an upgrade hint if a <2.0.0 SDK is
+    installed (`_require_supported_sdk`).
+  - `tests/unit/test_sdk_contract.py`: rebuilt against real 2.x types
+    (steps/ModelOutputStep/ThoughtStep; Union status; TypedDict kwargs
+    allowlist) + a timeline-leak test + transcript-steps test; plus a
+    client version-guard test and a smoke-test comment fix.
+  - streaming.py/rendering.py logic UNCHANGED - already 2.x-shaped.
+- **Gates:** ruff, ruff format, mypy strict, pytest all green
+  (436 -> 440 tests).
+- **Live validation (real API; 4 Deep Research runs ~4.3M tokens + 1
+  follow-up):**
+  - C1 smoke: PASS (SDK 2.x clears the schema 400).
+  - C2 polling (--no-stream, the empty-fetch path): complete report.md
+    (406 lines, 87 url_citation sources, status=completed, usage 942k).
+  - C2 streamed (--stream): clean completion, thoughts rendered live,
+    complete artifacts (55 sources, 1018k), no body leakage.
+  - C2 `gdr ls`/`status`: completed + token counts; record-at-create
+    confirmed (normal and on-interrupt).
+  - C2 Ctrl+C -> exit 130 + resume hint; `gdr resume` reattaches +
+    writes artifacts (sibling `_resumed_<ts>` dir on collision).
+  - C3 `--model gemini-3.1-pro-preview` follow-up: PASS (2-sentence
+    report, ~29k tokens, `previous_interaction_id` linkage works).
+  - C4 reconnect: not triggered (streamed run 411s < Google's ~600s
+    stream-drop threshold) - consciously observed, not a failure.
+- **Learnings for future iterations:** (load-bearing facts are in the new
+  "### google-genai 2.x Interactions API" subsection at the TOP.)
+  - Live validation is non-negotiable before release. Mocks and contract
+    tests against the *installed* SDK are necessary but cannot catch a
+    server-side schema change: the 1.73.1 contract tests were all green
+    while every live call 400'd.
+  - When a fix is "forward-written" to a schema the pinned dependency
+    can't emit yet, flag it LOUDLY - it looks done but is unproven until
+    the dependency catches up. Here an entire PR sat in that state.
+  - The 2.x SDK `interactions.create()` is `**body`, so the old
+    "kwargs subset of signature params" contract test silently passes
+    everything; validate against the typed create-params TypedDicts.
 ---

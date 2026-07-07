@@ -35,11 +35,14 @@ final snapshot is available after the stream ends. The UI layer subscribes
 to emissions for live rendering; the research command uses the aggregator's
 final state for logging/diagnostics only.
 
-**The final report is never reconstructed from the stream.** Per the docs,
+**The re-fetched interaction is preferred; the stream is the fallback.**
 ``interaction.completed`` during streaming omits full outputs, so the
 command always re-fetches via ``client.interactions.get(id=...)`` after the
-stream ends (whether cleanly or by disconnect). Partial delta buffers are
-discarded on disconnect. This is the contract the plan committed to.
+stream ends. When that fetch itself comes back without outputs (observed
+on current backends after a clean stream), the completed stream snapshot
+is used as the artifact source instead — see ``snapshot_outputs``. Partial
+buffers from a *disconnected* stream are still discarded; only a cleanly
+completed stream is trusted as a fallback.
 
 Disconnect detection is pushed up to the caller — :meth:`feed` surfaces
 :class:`StreamError` only when an ``error`` event arrives over the wire.
@@ -54,6 +57,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from gdr.core.normalize import get_field as _get
 from gdr.errors import StreamError
 
 # ---------------------------------------------------------------------------
@@ -174,20 +178,6 @@ def _make_builder(index: int, content_type: str | None) -> _Builder:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _get(obj: Any, name: str, default: Any = None) -> Any:
-    """Attribute-then-key lookup (mirrors rendering._get)."""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-# ---------------------------------------------------------------------------
 # Aggregator
 # ---------------------------------------------------------------------------
 
@@ -209,7 +199,14 @@ class AggregatedSnapshot:
     annotations: list[Any] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
+    # Parallel to ``images``: the MIME type observed for each image on
+    # the wire (start event or delta), or None when the stream never
+    # said (renderers fall back to image/png).
+    image_mimes: list[str | None] = field(default_factory=list)
     completed_cleanly: bool = False
+    # Token usage reported on the completion event, when present. Used
+    # as a fallback when the terminal fetch omits usage.
+    total_tokens: int | None = None
 
 
 class StreamAggregator:
@@ -225,10 +222,14 @@ class StreamAggregator:
         self._annotations: list[Any] = []
         self._thoughts: list[str] = []
         self._images: list[str] = []
+        self._image_mimes: list[str | None] = []
         self._image_chunks_by_index: dict[int, list[str]] = {}
+        self._image_mime_by_index: dict[int, str] = {}
         self._interaction_id: str | None = None
         self._status: str | None = None
         self._completed_cleanly = False
+        self._last_event_id: str | None = None
+        self._total_tokens: int | None = None
         self._on_event: Callable[[StreamEvent], None] = on_event or (lambda _e: None)
 
     # -- properties ----------------------------------------------------
@@ -241,6 +242,12 @@ class StreamAggregator:
     def status(self) -> str | None:
         return self._status
 
+    @property
+    def last_event_id(self) -> str | None:
+        """Id of the last processed SSE event — resume point for
+        ``interactions.get(id=..., stream=True, last_event_id=...)``."""
+        return self._last_event_id
+
     def snapshot(self) -> AggregatedSnapshot:
         return AggregatedSnapshot(
             interaction_id=self._interaction_id,
@@ -249,7 +256,9 @@ class StreamAggregator:
             annotations=list(self._annotations),
             thoughts=list(self._thoughts),
             images=list(self._images),
+            image_mimes=list(self._image_mimes),
             completed_cleanly=self._completed_cleanly,
+            total_tokens=self._total_tokens,
         )
 
     # -- ingestion -----------------------------------------------------
@@ -260,6 +269,9 @@ class StreamAggregator:
         Raises :class:`StreamError` on an ``error`` event. Unknown event
         types are ignored (forward-compatible with future SDK additions).
         """
+        event_id = _get(event, "event_id")
+        if event_id:
+            self._last_event_id = str(event_id)
         event_type = _get(event, "event_type")
 
         if event_type in ("interaction.created", "interaction.start"):
@@ -309,6 +321,10 @@ class StreamAggregator:
         if index is None:
             return
         content_type = _content_type_from_start_event(event)
+        if content_type == "image":
+            mime = _get(_get(event, "content"), "mime_type")
+            if mime:
+                self._image_mime_by_index[int(index)] = str(mime)
         self._builders[int(index)] = _make_builder(int(index), content_type)
         self._on_event(
             StreamEvent(kind="content_start", index=int(index), content_type=content_type)
@@ -346,6 +362,9 @@ class StreamAggregator:
                 self._thoughts.append(text)
                 self._on_event(StreamEvent(kind="thought", index=int(index), text=text))
         elif delta_type == "image":
+            mime = _get(delta, "mime_type")
+            if mime:
+                self._image_mime_by_index.setdefault(int(index), str(mime))
             data = _get(delta, "data", "") or ""
             if data:
                 self._image_chunks_by_index.setdefault(int(index), []).append(data)
@@ -365,8 +384,10 @@ class StreamAggregator:
         image_chunks = self._image_chunks_by_index.pop(int(index), [])
         if image_chunks:
             self._images.append("".join(image_chunks))
+            self._image_mimes.append(self._image_mime_by_index.pop(int(index), None))
         elif isinstance(builder, _ImageBuilder) and final:
             self._images.append(final)
+            self._image_mimes.append(self._image_mime_by_index.pop(int(index), None))
         self._on_event(StreamEvent(kind="content_stop", index=int(index)))
 
     def _handle_complete(self, event: Any) -> None:
@@ -378,6 +399,18 @@ class StreamAggregator:
             status = _get(interaction, "status")
             if status:
                 self._status = status
+            total_tokens = _get(_get(interaction, "usage"), "total_tokens")
+            if total_tokens is not None:
+                self._total_tokens = int(total_tokens)
+        # Flush image indexes that never saw a step/content stop — the
+        # snapshot doubles as an artifact source, so buffered image data
+        # must not be lost to a missing stop event.
+        for index in sorted(self._image_chunks_by_index):
+            chunks = self._image_chunks_by_index[index]
+            if chunks:
+                self._images.append("".join(chunks))
+                self._image_mimes.append(self._image_mime_by_index.pop(index, None))
+        self._image_chunks_by_index.clear()
         self._completed_cleanly = True
         self._on_event(
             StreamEvent(
@@ -415,8 +448,9 @@ def snapshot_outputs(snapshot: AggregatedSnapshot) -> list[dict[str, Any]]:
         if snapshot.annotations:
             text_output["annotations"] = list(snapshot.annotations)
         outputs.append(text_output)
-    for image in snapshot.images:
-        outputs.append({"type": "image", "data": image, "mime_type": "image/png"})
+    mimes = list(snapshot.image_mimes) + [None] * (len(snapshot.images) - len(snapshot.image_mimes))
+    for image, mime in zip(snapshot.images, mimes, strict=False):
+        outputs.append({"type": "image", "data": image, "mime_type": mime or "image/png"})
     return outputs
 
 
