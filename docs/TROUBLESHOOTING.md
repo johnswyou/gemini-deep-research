@@ -266,22 +266,25 @@ Don't lose the backup — `config set` can't restore nested
 
 ## `gdr follow-up` fails with HTTP 400 on a completed research run
 
-The Gemini API has been rejecting Deep Research follow-ups whose
+In April 2026 the Gemini API rejected Deep Research follow-ups whose
 parent is a *completed* research interaction with an opaque
-`400 - There was a problem processing your request.` This is
-server-side behavior, not a gdr bug (the same request 400s against
-the raw SDK). When it happens, gdr prints the alternatives:
+`400 - There was a problem processing your request.` — server-side
+behavior, not a gdr bug (the same request 400'd against the raw SDK).
+**As of 2026-07-07 this works again**: an agent-mode follow-up on a
+completed research parent was validated live end-to-end.
+
+This entry stays because the server behavior has changed before. If
+you hit the 400, gdr prints the alternatives:
 
 ```bash
-# Cheap clarification over the same context (plain model, no 400):
+# Cheap clarification over the same context (plain model, unaffected):
 gdr follow-up <id> "Elaborate on section 3" --model gemini-3.1-pro-preview
 
 # Or a fresh research run with the relevant context quoted in the query.
 ```
 
-Note that `previous_interaction_id` chaining *does* work for the
-planning flow (`gdr plan refine` / `gdr plan approve`) — the
-rejection is specific to follow-ups on terminal research runs.
+`previous_interaction_id` chaining for the planning flow
+(`gdr plan refine` / `gdr plan approve`) has worked throughout.
 
 ---
 

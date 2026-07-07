@@ -38,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failures now exit 5 (network) like the research pipeline.
 - Agent-mode follow-ups that hit the API's HTTP 400 on completed
   research parents now print the `--model` fallback and are documented
-  in USAGE/TROUBLESHOOTING.
+  in USAGE/TROUBLESHOOTING. (Live validation on 2026-07-07 found the
+  API accepting and completing these follow-ups again; the hint remains
+  as a safety net.)
 - `gdr ls` no longer mislabels `--model` follow-up records as the fast
   agent ("preview"); `gdr status` prints the run duration for finished
   runs instead of the record's wallclock age; `report.md`'s header

@@ -286,11 +286,11 @@ Two execution modes:
   clarifications. Mutually exclusive with `--max`; sends no research
   tools.
 
-> **Known API limitation:** the Gemini API has been rejecting
-> agent-mode follow-ups on *completed* research parents with an
-> opaque HTTP 400 (server-side; reproducible against the raw SDK).
-> The `--model` mode is not affected. When the 400 occurs, gdr
-> prints these alternatives. See
+> **API stability note:** in April 2026 the Gemini API rejected
+> agent-mode follow-ups on *completed* research parents with an opaque
+> HTTP 400. As of 2026-07-07 the same request is accepted and completes
+> (validated live, end-to-end). If the rejection ever returns, gdr
+> prints the `--model` fallback and alternatives — see
 > [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md#gdr-follow-up-fails-with-http-400-on-a-completed-research-run).
 
 If the parent run executed in untrusted-input mode, the follow-up

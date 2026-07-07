@@ -1840,3 +1840,40 @@ overwritten. Hence the RC-first habit for anything risky.
     full long values.
   - uv run from outside the repo needs --project <repo>; the smoke
     recipe in this entry works without an API key.
+
+## 2026-07-07 - Live validation of the remediation (real API key)
+- Ran the previously-open live checks after merging the remediation to
+  main (44479da). Total spend: ~140k tokens across one fast research
+  run (91.7k), one agent follow-up (47.4k), one cancelled probe, and
+  the flash-lite live smoke - well under a dollar.
+- Results (all PASS):
+  * Gated live smoke (RUN_LIVE_TESTS=1 pytest -m live): 1 passed.
+  * Streamed fast research run: completed cleanly; transcript.json
+    contains the full steps timeline (user_input/thought/model_output)
+    - the A1 fix observable on the wire (pre-fix, streamed transcripts
+    lost the timeline); 7 sources from fetch annotations; report body
+    correct; header stamped with finished_at.
+  * gdr ls shows the run; gdr status prints Duration (01:33) for the
+    terminal run and a Thought line sourced from real 2.x
+    ThoughtStep.summary (A2 fix live).
+  * B4 RESOLVED UPSTREAM: agent-mode follow-up on a completed research
+    parent is ACCEPTED again (raw-SDK probe with gdr's exact wire
+    shape; created id then cancelled), and a full `gdr follow-up`
+    completed end-to-end (47.4k tokens, correct parent linkage,
+    grounded answer). The April-2026 unconditional 400 has lifted.
+- Docs updated to match: USAGE follow-up note reframed as an API
+  stability note; TROUBLESHOOTING 400 entry marked historical/if-it-
+  recurs; review banner + CHANGELOG bullet updated.
+- Files changed: docs/USAGE.md, docs/TROUBLESHOOTING.md,
+  docs/CODE_REVIEW_v0.1.3.md, CHANGELOG.md, progress.txt.
+- **Learnings for future iterations:**
+  - Server-side Interactions behavior is a moving target: the follow-up
+    400 appeared (April), persisted through 2.x migration testing, and
+    silently lifted by July. Keep the CLI-side 400 hint as a safety net
+    and re-probe before trusting either state.
+  - Cheap follow-up-acceptance probe: create with gdr's exact kwargs
+    against a completed parent, then cancel(id) immediately - answers
+    "is it accepted" for pennies without a full run.
+  - A trivial-query fast research run (~90k tokens, ~90s) is the
+    cheapest way to mint a fresh completed Deep Research parent for
+    live tests.

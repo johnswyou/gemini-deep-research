@@ -2,9 +2,12 @@
 
 > **Remediation status (2026-07-07):** findings A1–A3, B1–B6, the
 > consolidation batch, and the docs table were fixed in the commits
-> following this review (see `CHANGELOG.md` → Unreleased). Still open:
-> live re-validation of agent-mode follow-up (needs an API key), legacy
-> stream-schema retirement, and the JsonlStore compaction note.
+> following this review (see `CHANGELOG.md` → Unreleased). Live
+> validation the same day confirmed the streamed-run fix on the wire
+> (transcript keeps the steps timeline) and found agent-mode follow-up
+> (B4) accepted and completing again — the April 400 has lifted. Still
+> open: legacy stream-schema retirement and the JsonlStore compaction
+> note.
 
 **Date:** 2026-07-07 · **Tree reviewed:** `6618dd2` (v0.1.3, clean) · **Scope:** full repo — architecture, correctness, code quality, tests, docs, packaging, CI.
 
