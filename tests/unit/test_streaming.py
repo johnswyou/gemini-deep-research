@@ -17,6 +17,7 @@ import pytest
 from gdr.core.streaming import (
     StreamAggregator,
     StreamEvent,
+    snapshot_outputs,
 )
 from gdr.errors import StreamError
 
@@ -270,3 +271,83 @@ class TestImageFlushOnComplete:
         snapshot = agg.snapshot()
         assert snapshot.completed_cleanly is True
         assert snapshot.images == ["aGk="]
+
+
+# ---------------------------------------------------------------------------
+# Current-schema edge fixtures (parity with the legacy-schema goldens)
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentSchemaEdgeFixtures:
+    def test_error_event_raises_stream_error(self) -> None:
+        events = _load_fixture("current_schema_mid_stream_error.jsonl")
+        agg = StreamAggregator()
+        with pytest.raises(StreamError) as excinfo:
+            for event in events:
+                agg.feed(event)
+        assert "RATE_LIMITED" in str(excinfo.value)
+        assert "Quota exceeded" in str(excinfo.value)
+        # Everything before the error was still aggregated.
+        assert agg.snapshot().text == "Starting the research..."
+
+    def test_out_of_order_delta_is_not_dropped(self) -> None:
+        agg, _events = _collect("current_schema_out_of_order.jsonl")
+        snapshot = agg.snapshot()
+        assert snapshot.completed_cleanly is True
+        assert snapshot.text == (
+            "Delta arrived without a preceding step.start. Subsequent chunks still append."
+        )
+
+    def test_disconnect_keeps_partial_state_without_clean_completion(self) -> None:
+        agg, _events = _collect("current_schema_disconnect_mid_text.jsonl")
+        snapshot = agg.snapshot()
+        assert snapshot.completed_cleanly is False
+        assert snapshot.interaction_id == "int-cur-disc-003"
+        assert snapshot.text == "# Partial report that gets cut off mid-sentence"
+        assert snapshot.thoughts == ["Reading source material."]
+        # The resume point for a reconnect is the last event seen.
+        assert agg.last_event_id == "evt-007"
+
+
+# ---------------------------------------------------------------------------
+# Streamed image MIME capture
+# ---------------------------------------------------------------------------
+
+
+class TestImageMimeCapture:
+    def test_mime_from_delta_reaches_snapshot_outputs(self) -> None:
+        agg = StreamAggregator()
+        agg.feed({"event_type": "step.start", "index": 0, "step": {"type": "image"}})
+        agg.feed(
+            {
+                "event_type": "step.delta",
+                "index": 0,
+                "delta": {"type": "image", "data": "aGk=", "mime_type": "image/jpeg"},
+            }
+        )
+        agg.feed({"event_type": "step.stop", "index": 0})
+        agg.feed(
+            {
+                "event_type": "interaction.completed",
+                "interaction": {"id": "int-mime-1", "status": "completed"},
+            }
+        )
+        outputs = snapshot_outputs(agg.snapshot())
+        images = [o for o in outputs if o["type"] == "image"]
+        assert images == [{"type": "image", "data": "aGk=", "mime_type": "image/jpeg"}]
+
+    def test_missing_mime_falls_back_to_png(self) -> None:
+        agg = StreamAggregator()
+        agg.feed(
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "image", "data": "aGk="}}
+        )
+        agg.feed({"event_type": "step.stop", "index": 0})
+        agg.feed(
+            {
+                "event_type": "interaction.completed",
+                "interaction": {"id": "int-mime-2", "status": "completed"},
+            }
+        )
+        outputs = snapshot_outputs(agg.snapshot())
+        images = [o for o in outputs if o["type"] == "image"]
+        assert images == [{"type": "image", "data": "aGk=", "mime_type": "image/png"}]

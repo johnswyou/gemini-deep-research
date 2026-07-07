@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -243,3 +244,67 @@ class TestResumeRecordUpdate:
         updated = store.find_by_id(record.id)
         assert updated is not None
         assert updated.status == "failed"
+
+
+class TestResumeFidelity:
+    def test_duration_uses_interaction_updated_time(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        _, record = _seed_record(tmp_path)
+        # Completed 30 minutes after the recorded start — resuming later
+        # (now) must report ~30 min, not wall time since the original run.
+        completed = SimpleNamespace(
+            id=record.id,
+            status="completed",
+            updated=datetime(2026, 4, 22, 14, 30, tzinfo=_UTC),
+            outputs=[SimpleNamespace(type="text", text="Recovered.", annotations=[])],
+            usage=None,
+        )
+        _install_fake_sdk(mocker, got=completed)
+
+        result = runner.invoke(
+            app,
+            ["resume", record.id, "--config", str(cfg), "--api-key", "AIzaSy-test-key-123456"],
+        )
+
+        assert result.exit_code == 0
+        metadata_path = next((tmp_path / "reports").rglob("metadata.json"))
+        metadata = json.loads(metadata_path.read_text())
+        assert metadata["duration_seconds"] == 30 * 60
+
+    def test_resume_metadata_keeps_original_tools(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        store = JsonlStore.open(state_dir / "interactions.jsonl")
+        record = Record(
+            id="intresume-tools",
+            created_at=datetime(2026, 4, 22, 14, 0, tzinfo=_UTC),
+            status="in_progress",
+            agent="deep-research-preview-04-2026",
+            query="Tooled query",
+            output_dir=tmp_path / "reports" / "tooled",
+            tools=("google_search", "url_context", "file_search", "mcp_server"),
+        )
+        store.append(record)
+        completed = SimpleNamespace(
+            id=record.id,
+            status="completed",
+            outputs=[SimpleNamespace(type="text", text="Recovered.", annotations=[])],
+            usage=None,
+        )
+        _install_fake_sdk(mocker, got=completed)
+
+        result = runner.invoke(
+            app,
+            ["resume", record.id, "--config", str(cfg), "--api-key", "AIzaSy-test-key-123456"],
+        )
+
+        assert result.exit_code == 0
+        metadata_path = next((tmp_path / "reports").rglob("metadata.json"))
+        metadata = json.loads(metadata_path.read_text())
+        # The record's summary survives instead of being wiped to [].
+        assert metadata["tools"] == ["google_search", "url_context", "file_search", "mcp_server"]

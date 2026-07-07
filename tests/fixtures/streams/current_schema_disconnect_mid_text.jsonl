@@ -1,0 +1,7 @@
+{"event_type": "interaction.created", "interaction": {"id": "int-cur-disc-003", "status": "in_progress"}, "event_id": "evt-001"}
+{"event_type": "step.start", "index": 0, "step": {"type": "thought"}, "event_id": "evt-002"}
+{"event_type": "step.delta", "index": 0, "delta": {"type": "thought_summary", "content": {"type": "text", "text": "Reading source material."}}, "event_id": "evt-003"}
+{"event_type": "step.stop", "index": 0, "event_id": "evt-004"}
+{"event_type": "step.start", "index": 1, "step": {"type": "model_output"}, "event_id": "evt-005"}
+{"event_type": "step.delta", "index": 1, "delta": {"type": "text", "text": "# Partial report"}, "event_id": "evt-006"}
+{"event_type": "step.delta", "index": 1, "delta": {"type": "text", "text": " that gets cut off mid-sentence"}, "event_id": "evt-007"}

@@ -1,0 +1,4 @@
+{"event_type": "interaction.created", "interaction": {"id": "int-cur-err-001", "status": "in_progress"}, "event_id": "evt-001"}
+{"event_type": "step.start", "index": 0, "step": {"type": "model_output"}, "event_id": "evt-002"}
+{"event_type": "step.delta", "index": 0, "delta": {"type": "text", "text": "Starting the research..."}, "event_id": "evt-003"}
+{"event_type": "error", "error": {"code": "RATE_LIMITED", "message": "Quota exceeded for today. Try again tomorrow."}, "event_id": "evt-004"}

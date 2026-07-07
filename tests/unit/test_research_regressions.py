@@ -428,3 +428,62 @@ class TestStreamedUsageFallback:
         record = _store(tmp_path).find_by_id("intabcxyz123")
         assert record is not None
         assert record.untrusted is True
+
+
+# ---------------------------------------------------------------------------
+# Plaintext-MCP warning (2026-07 polish round)
+# ---------------------------------------------------------------------------
+
+
+class TestPlaintextMcpWarning:
+    def test_http_mcp_with_headers_warns(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "q",
+                "--config",
+                str(cfg),
+                "--api-key",
+                _KEY,
+                "--no-stream",
+                "--mcp",
+                "local=http://mcp.internal:8080",
+                "--mcp-header",
+                "local=Authorization:Bearer abc",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "sent unencrypted" in result.output
+
+    def test_https_mcp_with_headers_does_not_warn(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "q",
+                "--config",
+                str(cfg),
+                "--api-key",
+                _KEY,
+                "--no-stream",
+                "--mcp",
+                "secure=https://mcp.example.com",
+                "--mcp-header",
+                "secure=Authorization:Bearer abc",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "sent unencrypted" not in result.output

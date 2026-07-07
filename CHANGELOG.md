@@ -27,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapter against real SDK response types (`Interaction`,
   `TextContent`, `ThoughtContent`, `Usage`) — the class of drift
   behind v0.1.1/v0.1.2 now fails in CI instead of in production.
+- An opt-in live smoke test (`RUN_LIVE_TESTS=1 pytest -m live`) proves
+  the create/poll/normalize pipeline against the real API using a
+  cheap plain model; the `live` marker gate promised by the test
+  config is now actually implemented.
+- Streamed images keep the MIME type observed on the wire instead of
+  assuming PNG; the streaming status line's elapsed timer now ticks
+  during quiet stretches between events.
+- `gdr resume` reports honest durations (using the interaction's
+  `updated` timestamp instead of the resume wall clock) and preserves
+  the original run's tools list in `metadata.json` under `--force`.
+- A warning is printed when an MCP server uses plain `http://` with
+  auth headers (credentials would travel unencrypted), and
+  `gdr config set` tightens the config file to `0600` and nudges
+  literal `api_key` values toward the `env:` form.
+- Current-schema golden stream fixtures for error, out-of-order, and
+  disconnect cases (parity with the legacy-schema fixtures).
 
 ### Security
 

@@ -1604,3 +1604,35 @@ overwritten. Hence the RC-first habit for anything risky.
     emits an "experimental" UserWarning - fine to leave visible in the
     contract tests as a version-drift signal.
 ---
+
+## 2026-07-07 - Polish round (remaining minor review items)
+- conftest.py now implements the RUN_LIVE_TESTS gate it always claimed;
+  new opt-in live smoke test (tests/test_live_smoke.py) drives
+  create/poll/normalize against the real API with gemini-2.5-flash-lite
+  (cents, seconds) - validates store=True + response shape live.
+- Streamed image MIME capture: aggregator records mime from step.start
+  content and image deltas (AggregatedSnapshot.image_mimes parallel
+  list); snapshot_outputs no longer hardcodes image/png.
+- Resume fidelity: finished_at from the interaction's `updated` field
+  (SDK datetime or ISO string, naive=UTC) so durations are honest;
+  write_artifacts/build_metadata accept tools_summary so --force
+  resume keeps the record's original tools in metadata.json.
+- Plaintext-MCP warning in execute_research (http:// + headers);
+  config set chmod 0600 + env: hint for literal api_key values.
+- Live-ticking stream timer: console.status now gets a _LiveStatusText
+  renderable whose __rich__ recomputes the line per refresh tick -
+  the elapsed display no longer freezes between events (dropped the
+  per-event .update() nudges).
+- Current-schema golden fixtures: mid_stream_error / out_of_order /
+  disconnect_mid_text now exist in both event schemas with tests
+  (including last_event_id assertion on the disconnect fixture).
+- Tests 424 -> 436 (+1 gated live). ruff/format/mypy strict green.
+- **Learnings for future iterations:**
+  - console.status accepts any renderable; an object with __rich__
+    gets re-rendered by the refresh thread ~12x/s - the cheap way to
+    get live-updating status text without an update() call site.
+  - pytest_collection_modifyitems + item.keywords is the right hook
+    for env-gated markers; keep the skip reason actionable.
+  - zip(strict=False) is required by ruff B905 on py310-compatible
+    code even when the length mismatch is handled by padding.
+---

@@ -158,6 +158,21 @@ class LiveRenderer:
         self._console.print(text, end="", highlight=False, markup=False, soft_wrap=True)
 
 
+class _LiveStatusText:
+    """Renderable whose content is recomputed on every Rich refresh tick.
+
+    Handing this to ``console.status`` (instead of a fixed string) keeps
+    the elapsed-time display ticking even when no stream events arrive —
+    Deep Research can go quiet for minutes while it works.
+    """
+
+    def __init__(self, renderer: LiveRenderer) -> None:
+        self._renderer = renderer
+
+    def __rich__(self) -> str:
+        return self._renderer.render_status_line()
+
+
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
@@ -203,11 +218,11 @@ def stream_with_live_ui(
     renderer = LiveRenderer(console=con, query=query, clock=clock)
     agg = StreamAggregator(on_event=renderer.handle)
 
-    with con.status(renderer.render_status_line(), spinner="dots") as status_widget:
+    # The status text is a live renderable: Rich's refresh thread re-renders
+    # it several times a second, so the elapsed timer ticks even during
+    # long quiet stretches between events.
+    with con.status(_LiveStatusText(renderer), spinner="dots"):
         reconnects_used = 0
-
-        def refresh_status() -> None:
-            status_widget.update(renderer.render_status_line())
 
         def _try_reconnect(exc: Exception) -> Iterator[Any] | None:
             """Re-attach to the stream, or None to fall back to polling.
@@ -231,8 +246,6 @@ def stream_with_live_ui(
             except Exception:
                 return None
 
-        # The StreamAggregator is push-based; we nudge status updates after
-        # each event so the timer keeps moving during active streaming.
         iterator = iter(stream)
         while True:
             try:
@@ -270,7 +283,6 @@ def stream_with_live_ui(
                     total_tokens=snapshot.total_tokens,
                 )
             agg.feed(event)
-            refresh_status()
 
     renderer.finish()
     con.print()  # one blank line after the stream, before the "Done" panel

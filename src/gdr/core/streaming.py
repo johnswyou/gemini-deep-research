@@ -199,6 +199,10 @@ class AggregatedSnapshot:
     annotations: list[Any] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
+    # Parallel to ``images``: the MIME type observed for each image on
+    # the wire (start event or delta), or None when the stream never
+    # said (renderers fall back to image/png).
+    image_mimes: list[str | None] = field(default_factory=list)
     completed_cleanly: bool = False
     # Token usage reported on the completion event, when present. Used
     # as a fallback when the terminal fetch omits usage.
@@ -218,7 +222,9 @@ class StreamAggregator:
         self._annotations: list[Any] = []
         self._thoughts: list[str] = []
         self._images: list[str] = []
+        self._image_mimes: list[str | None] = []
         self._image_chunks_by_index: dict[int, list[str]] = {}
+        self._image_mime_by_index: dict[int, str] = {}
         self._interaction_id: str | None = None
         self._status: str | None = None
         self._completed_cleanly = False
@@ -250,6 +256,7 @@ class StreamAggregator:
             annotations=list(self._annotations),
             thoughts=list(self._thoughts),
             images=list(self._images),
+            image_mimes=list(self._image_mimes),
             completed_cleanly=self._completed_cleanly,
             total_tokens=self._total_tokens,
         )
@@ -314,6 +321,10 @@ class StreamAggregator:
         if index is None:
             return
         content_type = _content_type_from_start_event(event)
+        if content_type == "image":
+            mime = _get(_get(event, "content"), "mime_type")
+            if mime:
+                self._image_mime_by_index[int(index)] = str(mime)
         self._builders[int(index)] = _make_builder(int(index), content_type)
         self._on_event(
             StreamEvent(kind="content_start", index=int(index), content_type=content_type)
@@ -351,6 +362,9 @@ class StreamAggregator:
                 self._thoughts.append(text)
                 self._on_event(StreamEvent(kind="thought", index=int(index), text=text))
         elif delta_type == "image":
+            mime = _get(delta, "mime_type")
+            if mime:
+                self._image_mime_by_index.setdefault(int(index), str(mime))
             data = _get(delta, "data", "") or ""
             if data:
                 self._image_chunks_by_index.setdefault(int(index), []).append(data)
@@ -370,8 +384,10 @@ class StreamAggregator:
         image_chunks = self._image_chunks_by_index.pop(int(index), [])
         if image_chunks:
             self._images.append("".join(image_chunks))
+            self._image_mimes.append(self._image_mime_by_index.pop(int(index), None))
         elif isinstance(builder, _ImageBuilder) and final:
             self._images.append(final)
+            self._image_mimes.append(self._image_mime_by_index.pop(int(index), None))
         self._on_event(StreamEvent(kind="content_stop", index=int(index)))
 
     def _handle_complete(self, event: Any) -> None:
@@ -393,6 +409,7 @@ class StreamAggregator:
             chunks = self._image_chunks_by_index[index]
             if chunks:
                 self._images.append("".join(chunks))
+                self._image_mimes.append(self._image_mime_by_index.pop(index, None))
         self._image_chunks_by_index.clear()
         self._completed_cleanly = True
         self._on_event(
@@ -431,8 +448,9 @@ def snapshot_outputs(snapshot: AggregatedSnapshot) -> list[dict[str, Any]]:
         if snapshot.annotations:
             text_output["annotations"] = list(snapshot.annotations)
         outputs.append(text_output)
-    for image in snapshot.images:
-        outputs.append({"type": "image", "data": image, "mime_type": "image/png"})
+    mimes = list(snapshot.image_mimes) + [None] * (len(snapshot.images) - len(snapshot.image_mimes))
+    for image, mime in zip(snapshot.images, mimes, strict=False):
+        outputs.append({"type": "image", "data": image, "mime_type": mime or "image/png"})
     return outputs
 
 

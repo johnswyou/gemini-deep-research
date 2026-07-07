@@ -257,3 +257,25 @@ class TestGetRedaction:
 
         assert result.exit_code == 0
         assert "[REDACTED]" not in result.output
+
+
+class TestSetHardening:
+    def test_set_tightens_file_permissions(self, runner: CliRunner, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app, ["config", "set", "default_agent", "deep-research-preview-04-2026"]
+        )
+        assert result.exit_code == 0
+        mode = (tmp_path / "config.toml").stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_set_literal_api_key_prints_env_hint(self, runner: CliRunner, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["config", "set", "api_key", "AIzaLiteralSecret1234"])
+        assert result.exit_code == 0
+        assert "env:GEMINI_API_KEY" in result.output
+
+    def test_set_env_reference_api_key_prints_no_hint(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = runner.invoke(app, ["config", "set", "api_key", "env:GEMINI_API_KEY"])
+        assert result.exit_code == 0
+        assert "Tip:" not in result.output

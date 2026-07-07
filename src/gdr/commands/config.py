@@ -19,6 +19,7 @@ comment-preserving edits should use ``gdr config edit`` instead.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import shutil
@@ -164,9 +165,19 @@ def set_cmd(
         raise typer.Exit(code=4) from exc
 
     _write_toml(target, existing)
+    # The config can hold secrets (api_key, MCP headers) — keep it
+    # owner-readable only. Best-effort: chmod is a no-op on some
+    # filesystems/platforms.
+    with contextlib.suppress(OSError):
+        target.chmod(0o600)
     console.print(
         f"[green]Wrote[/green] [bold]{key}[/bold] = {existing[key]!r} [dim]→ {target}[/dim]"
     )
+    if key == "api_key" and isinstance(existing[key], str) and "env:" not in existing[key]:
+        console.print(
+            '[dim]Tip: prefer api_key = "env:GEMINI_API_KEY" so the secret lives in your '
+            "environment, not on disk.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------

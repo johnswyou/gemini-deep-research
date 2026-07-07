@@ -493,6 +493,8 @@ def execute_research(
             f"[yellow]Untrusted-input mode stripped tools:[/yellow] {', '.join(stripped)}"
         )
 
+    _warn_plaintext_mcp(console, ctx_for_kwargs.mcp_servers)
+
     if dry_run:
         _print_dry_run(console, kwargs)
         return
@@ -803,6 +805,16 @@ def _with_fallback_outputs(
         "usage": usage,
         "error": get_field(interaction, "error"),
     }
+
+
+def _warn_plaintext_mcp(console: Console, mcp_servers: tuple[McpSpec, ...]) -> None:
+    """Flag MCP servers that would send auth headers over plain HTTP."""
+    for spec in mcp_servers:
+        if spec.url.startswith("http://") and spec.headers:
+            console.print(
+                f"[yellow]Warning:[/yellow] MCP server {spec.name!r} uses plain http:// "
+                f"with auth headers — credentials will be sent unencrypted."
+            )
 
 
 def _refetch_terminal(client: GdrClient, interaction_id: str, *, fallback_status: GdrError) -> Any:

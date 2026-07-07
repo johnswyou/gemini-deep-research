@@ -287,8 +287,23 @@ def build_metadata(
     started_at: datetime,
     finished_at: datetime,
     output_dir: Path,
+    tools_summary: Iterable[str] | None = None,
 ) -> dict[str, Any]:
+    """Assemble ``metadata.json``.
+
+    ``tools_summary`` overrides the tools list derived from ``ctx`` —
+    used by ``gdr resume``, whose reconstructed context has no tool
+    specs but whose Record kept the original summary strings.
+    """
     duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
+    if tools_summary is None:
+        tools = (
+            list(ctx.builtin_tools)
+            + ([] if ctx.file_search is None else ["file_search"])
+            + ["mcp_server"] * len(ctx.mcp_servers)
+        )
+    else:
+        tools = list(tools_summary)
     return {
         "interaction_id": _get(interaction, "id"),
         "previous_interaction_id": ctx.previous_interaction_id,
@@ -300,9 +315,7 @@ def build_metadata(
         "finished_at": finished_at.isoformat(),
         "duration_seconds": duration_seconds,
         "usage": _usage_dict(interaction),
-        "tools": list(ctx.builtin_tools)
-        + ([] if ctx.file_search is None else ["file_search"])
-        + ["mcp_server"] * len(ctx.mcp_servers),
+        "tools": tools,
         "output_dir": str(output_dir),
     }
 
@@ -357,6 +370,7 @@ def write_artifacts(
     policy: SecurityPolicy,
     started_at: datetime,
     finished_at: datetime,
+    tools_summary: Iterable[str] | None = None,
 ) -> dict[str, Path]:
     """Write the full artifact set and return a map of name → path.
 
@@ -381,6 +395,7 @@ def write_artifacts(
         started_at=started_at,
         finished_at=finished_at,
         output_dir=output_dir,
+        tools_summary=tools_summary,
     )
     transcript = build_transcript(interaction, policy=policy)
 

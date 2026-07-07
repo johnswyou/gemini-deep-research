@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -118,7 +119,9 @@ def run(
     ctx = _build_context_from_record(record, output_dir=target_dir)
     policy = SecurityPolicy(output_root=config.output_dir, untrusted=False)
 
-    finished_at = datetime.now(_UTC)
+    # Prefer the interaction's own `updated` timestamp: resuming a run
+    # that finished yesterday must not report a 20-hour duration.
+    finished_at = _terminal_finish_time(latest) or datetime.now(_UTC)
     paths = write_artifacts(
         latest,
         ctx=ctx,
@@ -126,6 +129,7 @@ def run(
         policy=policy,
         started_at=record.created_at,
         finished_at=finished_at,
+        tools_summary=record.tools,
     )
 
     # Bring the local record up to date (status, finish time, tokens)
@@ -181,6 +185,25 @@ def _dir_is_empty_or_missing(path: Path) -> bool:
     except StopIteration:
         return True
     return False
+
+
+def _terminal_finish_time(interaction: Any) -> datetime | None:
+    """Best-effort completion time from the interaction's ``updated`` field.
+
+    The SDK models ``updated`` as a datetime; raw dict shapes may carry an
+    ISO string. Returns an aware datetime (naive values are assumed UTC),
+    or None when the field is absent or unparseable.
+    """
+    raw = get_attr_or_key(interaction, "updated")
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=_UTC)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=_UTC)
+    return None
 
 
 def _build_context_from_record(record: Record, *, output_dir: Path) -> RunContext:
