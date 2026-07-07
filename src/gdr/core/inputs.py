@@ -15,10 +15,16 @@ from __future__ import annotations
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Literal
 
 from gdr.constants import SIMPLE_TOOLS, TOOL_FILE_SEARCH, TOOL_MCP_SERVER, TOOL_URL_CONTEXT
-from gdr.core.models import FileSearchSpec, McpSpec, MediaKind, MediaPart, TextPart
+from gdr.core.models import (
+    FileSearchSpec,
+    McpSpec,
+    MediaKind,
+    MediaPart,
+    TextPart,
+    Visualization,
+)
 from gdr.errors import ConfigError
 
 # ---------------------------------------------------------------------------
@@ -237,10 +243,8 @@ def parse_file_search_stores(names: list[str]) -> FileSearchSpec | None:
 # --visualization
 # ---------------------------------------------------------------------------
 
-_VisualizationLiteral = Literal["auto", "off"]
 
-
-def validate_visualization(value: str | None) -> _VisualizationLiteral | None:
+def validate_visualization(value: str | None) -> Visualization | None:
     """Return a validated ``auto``/``off`` literal or None when unset."""
     if value is None:
         return None

@@ -177,3 +177,20 @@ def parse_since(value: str, *, now: datetime | None = None) -> datetime:
 # Canonical attribute-then-key lookup, re-exported under the historical
 # command-layer name. The implementation lives in core/normalize.py.
 get_attr_or_key = get_field
+
+# One palette for every command that colors a status word (ls, status).
+_STATUS_COLORS: dict[str, str] = {
+    "completed": "green",
+    "failed": "red",
+    "cancelled": "yellow",
+    "incomplete": "red",
+    "budget_exceeded": "yellow",
+    "in_progress": "blue",
+    "requires_action": "blue",
+}
+
+
+def colored_status(status: str) -> str:
+    """Wrap a status word in its conventional Rich color markup."""
+    color = _STATUS_COLORS.get(status, "white")
+    return f"[{color}]{status}[/{color}]"

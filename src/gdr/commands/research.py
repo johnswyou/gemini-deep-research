@@ -20,7 +20,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from gdr.commands._common import friendly_errors, stdout_is_tty
+from gdr.commands._common import build_client, friendly_errors, stdout_is_tty
 from gdr.config import Config, load_config
 from gdr.constants import (
     AGENT_MAX,
@@ -48,6 +48,7 @@ from gdr.core.models import (
     McpSpec,
     Record,
     RunContext,
+    Visualization,
 )
 from gdr.core.normalize import error_of, get_field, has_report_content, interaction_status
 from gdr.core.persistence import JsonlStore, Store
@@ -56,6 +57,7 @@ from gdr.core.rendering import write_artifacts
 from gdr.core.requests import build_create_kwargs
 from gdr.core.security import SecurityPolicy, id_fragment, sanitize_slug
 from gdr.errors import (
+    EXIT_INTERRUPTED,
     ConfigError,
     GdrError,
     NetworkError,
@@ -67,8 +69,6 @@ from gdr.ui.live import stream_with_live_ui
 from gdr.ui.progress import run_with_live_status
 
 _UTC = timezone.utc
-
-EXIT_INTERRUPTED = 130
 
 
 @dataclass(frozen=True)
@@ -82,16 +82,6 @@ class _CreateOutcome:
 # ---------------------------------------------------------------------------
 # Option parsing helpers
 # ---------------------------------------------------------------------------
-
-
-def _resolve_api_key(cli_arg: str | None, env: dict[str, str], config: Config) -> str | None:
-    """CLI flag → GEMINI_API_KEY env var → config value (already env-expanded)."""
-    if cli_arg:
-        return cli_arg
-    env_key = env.get("GEMINI_API_KEY")
-    if env_key:
-        return env_key
-    return config.api_key
 
 
 def _allocate_output_dir(
@@ -138,7 +128,7 @@ def _build_run_context(
     mcp_servers: tuple[McpSpec, ...] = (),
     file_search: FileSearchSpec | None = None,
     input_parts: tuple[InputPart, ...] = (),
-    visualization: str | None = None,
+    visualization: Visualization | None = None,
     untrusted_input: bool = False,
     model: str | None = None,
 ) -> RunContext:
@@ -156,8 +146,8 @@ def _build_run_context(
         stream=stream,
         background=True,
         agent_config=AgentConfig(
-            thinking_summaries=config.thinking_summaries,  # type: ignore[arg-type]
-            visualization=effective_visualization,  # type: ignore[arg-type]
+            thinking_summaries=config.thinking_summaries,
+            visualization=effective_visualization,
             collaborative_planning=False,
         ),
         previous_interaction_id=previous_interaction_id,
@@ -208,7 +198,7 @@ def _parse_flag_inputs(
     tuple[McpSpec, ...],
     FileSearchSpec | None,
     tuple[InputPart, ...],
-    str | None,
+    Visualization | None,
 ]:
     """Turn raw CLI flag values into typed domain objects.
 
@@ -374,7 +364,7 @@ def run(
         if use_max and config.confirm_max and not no_confirm and not _confirm_max(console):
             console.print("[yellow]Aborted.[/yellow]")
             raise typer.Exit(code=0)
-        client = _safe_build_client(console, api_key=api_key, config=config)
+        client = build_client(console, api_key=api_key, config=config)
         plan_id = interactive_plan_loop(
             client,
             initial_query=query,
@@ -434,7 +424,7 @@ def execute_research(
     mcp_servers: tuple[McpSpec, ...] = (),
     file_search: FileSearchSpec | None = None,
     input_parts: tuple[InputPart, ...] = (),
-    visualization: str | None = None,
+    visualization: Visualization | None = None,
     untrusted_input: bool = False,
     model: str | None = None,
 ) -> None:
@@ -525,7 +515,7 @@ def execute_research(
         console.print("[yellow]Aborted.[/yellow]")
         raise typer.Exit(code=0)
 
-    client = _safe_build_client(console, api_key=api_key, config=config)
+    client = build_client(console, api_key=api_key, config=config)
 
     started_at = datetime.now(_UTC)
     create_outcome, interaction_id, recorded_dirs = _submit_interaction(
@@ -732,18 +722,6 @@ def _build_request_kwargs(
     if api_input is not None:
         kwargs["input"] = api_input
     return kwargs, stripped
-
-
-def _safe_build_client(console: Console, *, api_key: str | None, config: Config) -> GdrClient:
-    """Build a GdrClient with clear error messaging."""
-    import os  # noqa: PLC0415 — only needed for API key env lookup
-
-    resolved_key = _resolve_api_key(api_key, dict(os.environ), config)
-    try:
-        return GdrClient(api_key=resolved_key)
-    except ConfigError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(code=exc.exit_code) from exc
 
 
 # ---------------------------------------------------------------------------

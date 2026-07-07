@@ -37,7 +37,7 @@ from gdr.core.client import GdrClient
 from gdr.core.models import AgentConfig, InputPart
 from gdr.core.normalize import interaction_id_of, normalized_outputs
 from gdr.core.requests import serialize_input
-from gdr.errors import GdrError
+from gdr.errors import NetworkError
 from gdr.ui.progress import run_with_live_status
 
 # ---------------------------------------------------------------------------
@@ -139,11 +139,13 @@ def run_plan_phase(
     try:
         initial = client.interactions.create(**build_plan_kwargs(req))
     except Exception as exc:
-        raise GdrError(f"Failed to create plan: {exc}") from exc
+        # Same classification as the research pipeline: submission
+        # failures are network errors (exit 5), not generic failures.
+        raise NetworkError(f"Failed to create plan: {exc}") from exc
 
     interaction_id = extract_interaction_id(initial)
     if not interaction_id:
-        raise GdrError("Plan request returned no interaction id.")
+        raise NetworkError("Plan request returned no interaction id.")
 
     # Plans are fast; reuse the polling helper with a short descriptive
     # query so the spinner tells the user what's going on.
@@ -224,7 +226,7 @@ def interactive_plan_loop(
         plan_interaction = run_plan_phase(client, req=request, console=console)
         plan_id = extract_interaction_id(plan_interaction)
         if not plan_id:
-            raise GdrError("Plan interaction had no id.")
+            raise NetworkError("Plan interaction had no id.")
         show_plan(console, plan_interaction)
 
         # Inner loop: keep asking until the user gives us real feedback or

@@ -76,8 +76,6 @@ class Store(Protocol):
         since: datetime | None = None,
     ) -> list[Record]: ...
 
-    def list_children(self, parent_id: str) -> list[Record]: ...
-
 
 # ---------------------------------------------------------------------------
 # JSONL implementation
@@ -166,13 +164,6 @@ class JsonlStore:
         if limit is not None:
             sorted_records = sorted_records[:limit]
         return sorted_records
-
-    def list_children(self, parent_id: str) -> list[Record]:
-        """Return records whose parent_id equals the given interaction id."""
-        return sorted(
-            (r for r in self._index.values() if r.parent_id == parent_id),
-            key=lambda r: r.created_at,
-        )
 
     # -- introspection -------------------------------------------------
 

@@ -185,11 +185,15 @@ class RunContext(BaseModel):
 class Record(BaseModel):
     """A single row in the local interaction store.
 
-    Serialized as one JSON line in `interactions.jsonl`. Fields are kept
-    minimal and stable so old records remain readable as the schema evolves.
+    Serialized as one JSON line in `interactions.jsonl`. Unlike the
+    request-side models, unknown fields are *ignored* rather than
+    rejected: rows are machine-written by whichever gdr version ran the
+    research, and history must stay readable across schema changes in
+    both directions (older rows carry retired fields; newer rows may
+    carry fields this version doesn't know yet).
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     id: str
     parent_id: str | None = None
@@ -201,7 +205,6 @@ class Record(BaseModel):
     output_dir: Path
     total_tokens: int | None = None
     tools: tuple[str, ...] = Field(default_factory=tuple)
-    note: str | None = None
     # Whether the run was executed in untrusted-input mode. Persisted so
     # follow-ups can inherit the parent's security posture.
     untrusted: bool = False

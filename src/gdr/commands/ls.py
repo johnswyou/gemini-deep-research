@@ -19,7 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from gdr.commands._common import friendly_errors, open_store, parse_since
+from gdr.commands._common import colored_status, friendly_errors, open_store, parse_since
 from gdr.constants import AGENT_FAST, AGENT_MAX
 from gdr.core.models import Record
 from gdr.errors import ConfigError
@@ -98,7 +98,7 @@ def _render_table(console: Console, records: list[Record], *, show_full_id: bool
         table.add_row(
             _format_id(record.id, full=show_full_id),
             record.created_at.strftime("%Y-%m-%d %H:%M"),
-            _format_status(record.status),
+            colored_status(record.status),
             _shorten_agent(record.agent),
             _format_tokens(record.total_tokens),
             _truncate(record.query, _MAX_QUERY_CHARS),
@@ -113,17 +113,6 @@ def _format_id(interaction_id: str, *, full: bool) -> str:
     # Show the first 12 characters — long enough to disambiguate in most
     # stores, short enough to keep the table readable.
     return interaction_id[:12] + ("…" if len(interaction_id) > 12 else "")
-
-
-def _format_status(status: str) -> str:
-    palette = {
-        "completed": "green",
-        "failed": "red",
-        "cancelled": "yellow",
-        "in_progress": "blue",
-    }
-    color = palette.get(status, "white")
-    return f"[{color}]{status}[/{color}]"
 
 
 _AGENT_LABELS = {

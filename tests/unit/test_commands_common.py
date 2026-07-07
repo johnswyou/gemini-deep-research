@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from gdr.commands._common import parse_since
+from gdr.commands._common import colored_status, parse_since
+from gdr.constants import STATUS_IN_PROGRESS, TERMINAL_STATUSES
 from gdr.errors import ConfigError
 
 _UTC = timezone.utc
@@ -75,3 +76,11 @@ class TestParseSinceErrors:
     def test_unknown_unit_rejected(self) -> None:
         with pytest.raises(ConfigError):
             parse_since("5y")
+
+
+class TestColoredStatus:
+    def test_every_terminal_status_has_a_color(self) -> None:
+        for status in TERMINAL_STATUSES | {STATUS_IN_PROGRESS}:
+            rendered = colored_status(status)
+            assert rendered != status, f"{status} rendered with no color markup"
+            assert status in rendered

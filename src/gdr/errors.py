@@ -17,6 +17,10 @@ from __future__ import annotations
 #   130 user interrupt (Ctrl+C; raised explicitly by the research command
 #       after printing a resume hint)
 
+# Not an exception (interrupts exit directly), but part of the same
+# contract — kept here so the whole exit-code table lives in one module.
+EXIT_INTERRUPTED = 130
+
 
 class GdrError(Exception):
     """Base for all errors raised by gdr."""

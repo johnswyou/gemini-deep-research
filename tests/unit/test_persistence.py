@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -129,15 +130,6 @@ class TestJsonlStore:
         since = [r.id for r in store.recent(since=datetime(2026, 4, 22, 12, 0, tzinfo=_UTC))]
         assert since == ["new"]
 
-    def test_list_children_filters_by_parent(self, tmp_path: Path) -> None:
-        store = JsonlStore.open(tmp_path / "s.jsonl")
-        store.append(_record(id_="parent"))
-        store.append(_record(id_="child-1", parent_id="parent"))
-        store.append(_record(id_="child-2", parent_id="parent"))
-        store.append(_record(id_="unrelated", parent_id="other"))
-        kids = [r.id for r in store.list_children("parent")]
-        assert set(kids) == {"child-1", "child-2"}
-
     def test_skips_unreadable_lines_on_load(self, tmp_path: Path) -> None:
         path = tmp_path / "s.jsonl"
         # Good record + malformed JSON + good record.
@@ -169,3 +161,28 @@ class TestJsonlStore:
             fh.write("\n")
         store = JsonlStore.open(path)
         assert len(store) == 1
+
+
+class TestSchemaEvolution:
+    def test_rows_with_unknown_fields_still_load(self, tmp_path: Path) -> None:
+        # Rows written by other gdr versions may carry fields this version
+        # doesn't know (e.g. the retired `note`). History must not be
+        # silently orphaned over that.
+        store_path = tmp_path / "interactions.jsonl"
+        row = {
+            "id": "intcompat1",
+            "parent_id": None,
+            "created_at": "2026-07-01T00:00:00Z",
+            "finished_at": None,
+            "status": "completed",
+            "agent": "deep-research-preview-04-2026",
+            "query": "q",
+            "output_dir": "/tmp/reports/x",
+            "total_tokens": 10,
+            "tools": [],
+            "note": None,
+            "field_from_the_future": {"nested": True},
+        }
+        store_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        store = JsonlStore.open(store_path)
+        assert store.find_by_id("intcompat1") is not None

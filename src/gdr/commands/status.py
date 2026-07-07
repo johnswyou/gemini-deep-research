@@ -23,6 +23,7 @@ from rich.console import Console
 
 from gdr.commands._common import (
     build_client,
+    colored_status,
     friendly_errors,
     get_attr_or_key,
     load_cfg,
@@ -59,7 +60,7 @@ def run(
         raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     status = str(get_attr_or_key(interaction, "status") or "unknown")
-    console.print(f"[bold]Status:[/bold] {_colored_status(status)}")
+    console.print(f"[bold]Status:[/bold] {colored_status(status)}")
     console.print(f"[bold]ID:[/bold]     {interaction_id}")
 
     # Timing — best-effort, only when we have a local record. The SDK does
@@ -76,17 +77,6 @@ def run(
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
-
-
-def _colored_status(status: str) -> str:
-    palette = {
-        "completed": "green",
-        "failed": "red",
-        "cancelled": "yellow",
-        "in_progress": "blue",
-    }
-    color = palette.get(status, "white")
-    return f"[{color}]{status}[/{color}]"
 
 
 def _print_timing(console: Console, record: Record, *, status: str) -> None:

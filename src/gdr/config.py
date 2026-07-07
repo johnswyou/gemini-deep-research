@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from gdr.constants import AGENT_FAST, DEFAULT_TOOLS, SIMPLE_TOOLS
+from gdr.core.models import ThinkingSummaries, Visualization
 from gdr.errors import ConfigError
 
 ENV_PREFIX = "env:"
@@ -99,8 +100,10 @@ class Config(BaseModel):
     auto_open: bool = True
     confirm_max: bool = True
     default_tools: tuple[str, ...] = DEFAULT_TOOLS
-    thinking_summaries: str = "auto"
-    visualization: str = "auto"
+    # Same Literal types as AgentConfig, so values flow into request
+    # assembly without re-validation or casts.
+    thinking_summaries: ThinkingSummaries = "auto"
+    visualization: Visualization = "auto"
     safe_untrusted: bool = True
     mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
@@ -121,20 +124,6 @@ class Config(BaseModel):
                 raise ValueError(
                     f"{name!r} is not a simple builtin tool. Simple tools: {list(SIMPLE_TOOLS)}"
                 )
-        return v
-
-    @field_validator("thinking_summaries")
-    @classmethod
-    def _validate_thinking(cls, v: str) -> str:
-        if v not in {"auto", "none"}:
-            raise ValueError(f"thinking_summaries must be 'auto' or 'none', got {v!r}")
-        return v
-
-    @field_validator("visualization")
-    @classmethod
-    def _validate_visualization(cls, v: str) -> str:
-        if v not in {"auto", "off"}:
-            raise ValueError(f"visualization must be 'auto' or 'off', got {v!r}")
         return v
 
 
@@ -250,10 +239,7 @@ def load_config(
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Invalid TOML in {target}: {exc}") from exc
 
-    try:
-        expanded = _walk_and_expand(raw, env=source_env)
-    except ConfigError:
-        raise  # already well-formatted
+    expanded = _walk_and_expand(raw, env=source_env)
 
     try:
         return Config.model_validate(expanded)

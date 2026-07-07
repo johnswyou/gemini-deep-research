@@ -17,14 +17,13 @@ For interactive approve/refine in one session, prefer
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
-from gdr.commands._common import friendly_errors, stdout_is_tty
+from gdr.commands._common import build_client, friendly_errors, stdout_is_tty
 from gdr.commands.research import execute_research
 from gdr.config import load_config
 from gdr.constants import AGENT_MAX
@@ -36,7 +35,7 @@ from gdr.core.planning import (
     show_plan,
 )
 from gdr.core.security import id_fragment
-from gdr.errors import ConfigError, GdrError, NetworkError
+from gdr.errors import NetworkError
 
 app = typer.Typer(
     name="plan",
@@ -55,19 +54,13 @@ app = typer.Typer(
 def _build_plan_client(
     console: Console, *, api_key: str | None, config_path: Path | None
 ) -> tuple[GdrClient, str]:
-    """Load config, resolve the API key, and construct the SDK client.
+    """Load config and construct the SDK client via the shared helper.
 
     Returns ``(client, default_agent)``. Exits with a friendly message on
     any config/auth failure.
     """
     config = load_config(path=config_path)
-    resolved_key = api_key or os.environ.get("GEMINI_API_KEY") or config.api_key
-    try:
-        client = GdrClient(api_key=resolved_key)
-    except ConfigError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        raise typer.Exit(code=exc.exit_code) from exc
-    return client, config.default_agent
+    return build_client(console, api_key=api_key, config=config), config.default_agent
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +97,8 @@ def refine_cmd(
         agent=AGENT_MAX if use_max else default_agent,
         previous_interaction_id=plan_id,
     )
-    try:
-        plan_interaction = run_plan_phase(client, req=request, console=console)
-    except GdrError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=exc.exit_code) from exc
+    # Failures propagate to the @friendly_errors boundary.
+    plan_interaction = run_plan_phase(client, req=request, console=console)
 
     show_plan(console, plan_interaction)
 
