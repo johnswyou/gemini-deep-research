@@ -26,7 +26,6 @@ from typing import Any
 from rich.console import Console
 
 from gdr.core.streaming import StreamAggregator, StreamEvent, snapshot_outputs
-from gdr.errors import StreamError
 from gdr.ui.progress import format_elapsed
 
 
@@ -41,12 +40,17 @@ class LiveStreamResult:
     ``completed_cleanly`` is ``True`` only when an ``interaction.completed``
     event arrived. A disconnect that kills the iterator leaves it ``False``
     and the caller should fall through to polling.
+
+    ``interrupted`` is ``True`` when the user hit Ctrl+C while the stream
+    was being consumed. The caller should stop (printing a resume hint),
+    not fall through to polling.
     """
 
     interaction_id: str | None
     status: str | None
     completed_cleanly: bool
     streamed_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    interrupted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -196,8 +200,17 @@ def stream_with_live_ui(
                 event = next(iterator)
             except StopIteration:
                 break
-            except StreamError:
-                raise
+            except KeyboardInterrupt:
+                # The user asked to stop. Hand back whatever we know (most
+                # importantly the interaction id, so the caller can print a
+                # resume hint) instead of unwinding with a traceback.
+                renderer.finish()
+                return LiveStreamResult(
+                    interaction_id=agg.interaction_id,
+                    status=agg.status,
+                    completed_cleanly=False,
+                    interrupted=True,
+                )
             except Exception as exc:
                 # Defensive — httpx, IOError, or any SDK-surfaced transport
                 # exception is treated uniformly as a disconnect. The caller

@@ -17,10 +17,12 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from gdr.commands._common import build_client, get_attr_or_key, load_cfg
+from gdr.commands._common import build_client, friendly_errors, get_attr_or_key, load_cfg
 from gdr.constants import TERMINAL_STATUSES
+from gdr.errors import NetworkError
 
 
+@friendly_errors
 def run(
     interaction_id: str = typer.Argument(..., help="Interaction id to cancel."),
     api_key: str | None = typer.Option(
@@ -38,8 +40,7 @@ def run(
     try:
         current = client.interactions.get(id=interaction_id)
     except Exception as exc:
-        console.print(f"[red]Failed to fetch interaction:[/red] {exc}")
-        raise typer.Exit(code=5) from exc
+        raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     current_status = str(get_attr_or_key(current, "status") or "unknown")
     if current_status in TERMINAL_STATUSES:
@@ -60,7 +61,6 @@ def run(
     try:
         cancel(id=interaction_id)
     except Exception as exc:
-        console.print(f"[red]Failed to cancel interaction:[/red] {exc}")
-        raise typer.Exit(code=5) from exc
+        raise NetworkError(f"Failed to cancel interaction {interaction_id}: {exc}") from exc
 
     console.print(f"[green]Cancel request sent[/green] for id [dim]{interaction_id}[/dim].")

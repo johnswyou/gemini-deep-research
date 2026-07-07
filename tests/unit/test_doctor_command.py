@@ -168,3 +168,32 @@ class TestDoctor:
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 4
         assert "not writable" in result.output
+
+
+# ---------------------------------------------------------------------------
+# SDK version comparison (2026-07 review: check previously never compared)
+# ---------------------------------------------------------------------------
+
+
+class TestGenaiVersionCheck:
+    def test_old_sdk_version_fails_the_check(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        mocker.patch("gdr.commands.doctor.sdk_version", return_value="1.20.0")
+
+        result = runner.invoke(app, ["doctor"])
+
+        assert result.exit_code == 4
+        assert "1.20.0" in result.output
+        assert "older than" in result.output
+
+    def test_unknown_sdk_version_warns_but_does_not_fail(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        mocker.patch("gdr.commands.doctor.sdk_version", return_value="unknown")
+        # Keep the other checks green so the exit code isolates this one.
+        (tmp_path / "reports").mkdir(parents=True, exist_ok=True)
+
+        result = runner.invoke(app, ["doctor"])
+
+        assert "version unknown" in result.output

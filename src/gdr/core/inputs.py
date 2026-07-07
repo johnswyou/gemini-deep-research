@@ -51,6 +51,11 @@ def validate_tool_names(tools: list[str]) -> tuple[str, ...]:
 
 _DEFAULT_MIME = "application/octet-stream"
 
+# Inline request payloads are capped by the API (20 MB total request size
+# for inline media). Reject obviously-too-large files before reading and
+# base64-inflating them into memory.
+MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024
+
 
 def _media_kind_for_mime(mime: str) -> MediaKind:
     """Map a MIME type to the API's coarse-grained media kind.
@@ -72,11 +77,20 @@ def _media_kind_for_mime(mime: str) -> MediaKind:
 def parse_file(path: Path) -> MediaPart:
     """Read a local file, base64-encode it, and wrap in a MediaPart.
 
-    Raises ConfigError if the file doesn't exist or is unreadable.
+    Raises ConfigError if the file doesn't exist, is unreadable, or is
+    too large to send inline (the base64 body must fit the API's ~20 MB
+    request cap — larger media belongs in the Files API / File Search).
     """
     resolved = path.expanduser()
     if not resolved.is_file():
         raise ConfigError(f"--file path does not exist or is not a regular file: {path}")
+    size = resolved.stat().st_size
+    if size > MAX_INLINE_FILE_BYTES:
+        raise ConfigError(
+            f"--file {path} is {size / 1024 / 1024:.1f} MB — too large to send inline "
+            f"(limit ~{MAX_INLINE_FILE_BYTES // 1024 // 1024} MB). Upload large media to a "
+            f"File Search store and use --file-search-store instead."
+        )
     try:
         raw = resolved.read_bytes()
     except OSError as exc:

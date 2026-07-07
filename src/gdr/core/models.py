@@ -205,10 +205,6 @@ class Record(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def default_agent_config() -> AgentConfig:
-    return AgentConfig()
-
-
 def default_run_context_for_query(query: str, output_dir: Path) -> RunContext:
     """Convenience constructor for tests + smoke flows."""
     return RunContext(

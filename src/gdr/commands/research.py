@@ -9,20 +9,27 @@ submit → stream/poll → render pipeline.
 from __future__ import annotations
 
 import json
-import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from gdr.commands._common import friendly_errors, stdout_is_tty
 from gdr.config import Config, load_config
-from gdr.constants import AGENT_FAST, AGENT_MAX, TERMINAL_STATUSES
+from gdr.constants import (
+    AGENT_MAX,
+    STATUS_CANCELLED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    TERMINAL_STATUSES,
+    TOOL_URL_CONTEXT,
+)
 from gdr.core.client import GdrClient
 from gdr.core.inputs import (
     ensure_url_context_tool,
@@ -41,22 +48,33 @@ from gdr.core.models import (
     Record,
     RunContext,
 )
+from gdr.core.normalize import error_of, get_field
 from gdr.core.persistence import JsonlStore, Store
 from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
 from gdr.core.requests import build_create_kwargs
-from gdr.core.security import SecurityPolicy, sanitize_slug
-from gdr.errors import ConfigError, GdrError, StreamError
+from gdr.core.security import SecurityPolicy, id_fragment, sanitize_slug
+from gdr.errors import (
+    ConfigError,
+    GdrError,
+    NetworkError,
+    ResearchCancelledError,
+    ResearchFailedError,
+    StreamError,
+)
 from gdr.ui.live import stream_with_live_ui
 from gdr.ui.progress import run_with_live_status
 
 _UTC = timezone.utc
+
+EXIT_INTERRUPTED = 130
 
 
 @dataclass(frozen=True)
 class _CreateOutcome:
     interaction_id: str | None
     fallback_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    interrupted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -85,29 +103,25 @@ def _allocate_output_dir(
 ) -> Path:
     """Resolve the directory that will hold this run's artifacts.
 
-    When ``override`` is given it's used verbatim (still subject to
-    ``SecurityPolicy.confine`` if the user passed something weird — e.g. a
-    path outside their configured root). Otherwise we build a stable
-    ``<ts>_<slug>_<id6>`` name under the config's output_dir.
+    An explicit ``override`` (``--output``) is honored verbatim — it is the
+    user's own machine and their stated intent, so confinement to the
+    configured ``output_dir`` does not apply. Derived paths (the default
+    ``<ts>_<slug>_<id6>`` layout) ARE confined, since their slug component
+    comes from arbitrary query text.
     """
     if override is not None:
         return override.expanduser().resolve()
 
     slug = sanitize_slug(query)
-    id_fragment = re.sub(r"[^A-Za-z0-9]+", "", interaction_id)[:6] or "noid"
     ts = started_at.strftime("%Y-%m-%dT%H-%M")
-    candidate = root / f"{ts}_{slug}_{id_fragment}"
+    candidate = root / f"{ts}_{slug}_{id_fragment(interaction_id)}"
     return policy.confine(candidate)
 
 
 def _resolve_agent(config: Config, *, use_max: bool) -> str:
-    if use_max:
-        return AGENT_MAX
-    if config.default_agent not in (AGENT_FAST, AGENT_MAX):
-        # Allow unknown ids from config (Google may release new agents), but
-        # still honor them as-is.
-        return config.default_agent
-    return config.default_agent
+    """``--max`` wins; otherwise honor the configured agent id as-is
+    (Google may release new agents, so unknown ids are not rejected)."""
+    return AGENT_MAX if use_max else config.default_agent
 
 
 def _build_run_context(
@@ -149,10 +163,31 @@ def _build_run_context(
     )
 
 
-def _default_stream_preference() -> bool:
-    """Default ``--stream`` value: on when stdout is an interactive TTY."""
-    isatty = getattr(sys.stdout, "isatty", None)
-    return bool(isatty()) if callable(isatty) else False
+def _merge_config_mcps(config: Config, cli_specs: tuple[McpSpec, ...]) -> tuple[McpSpec, ...]:
+    """Attach config-declared ``[mcp_servers.*]`` entries to the run.
+
+    CLI ``--mcp`` flags win on name collision (they are the more explicit
+    intent); config servers are appended in name order so the wire shape
+    stays deterministic.
+    """
+    cli_names = {spec.name for spec in cli_specs}
+    merged = list(cli_specs)
+    for name in sorted(config.mcp_servers):
+        if name in cli_names:
+            continue
+        server = config.mcp_servers[name]
+        try:
+            merged.append(
+                McpSpec(
+                    name=name,
+                    url=server.url,
+                    headers=dict(server.headers),
+                    allowed_tools=server.allowed_tools,
+                )
+            )
+        except ValueError as exc:
+            raise ConfigError(f"Invalid [mcp_servers.{name}] entry in config: {exc}") from exc
+    return tuple(merged)
 
 
 def _parse_flag_inputs(
@@ -205,6 +240,7 @@ def _parse_flag_inputs(
 # ---------------------------------------------------------------------------
 
 
+@friendly_errors
 def run(
     query: str = typer.Argument(..., help="Your research question."),
     use_max: bool = typer.Option(
@@ -291,7 +327,7 @@ def run(
     """Run a Deep Research task and save the report to disk."""
     console = Console()
     config = load_config(path=config_path)
-    use_stream = _default_stream_preference() if stream is None else stream
+    use_stream = stdout_is_tty() if stream is None else stream
 
     # Parse CLI inputs into domain objects up front. Any parse error is a
     # ConfigError → exit code 4 so the user sees a friendly message.
@@ -308,6 +344,12 @@ def run(
     except ConfigError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc
+
+    # --url must guarantee the url_context tool regardless of where the
+    # effective tool list came from. _parse_flag_inputs already covers the
+    # --tool override case; cover narrowed config defaults here.
+    if urls and tools_override is None and TOOL_URL_CONTEXT not in config.default_tools:
+        tools_override = ensure_url_context_tool(tuple(config.default_tools), has_urls=True)
 
     # --untrusted-input OR (files/urls + safe_untrusted = true) triggers tool
     # stripping. The SecurityPolicy owns the actual filtering.
@@ -398,7 +440,6 @@ def execute_research(
     """
     policy = SecurityPolicy(
         output_root=config.output_dir,
-        safe_untrusted=config.safe_untrusted,
         untrusted=untrusted_input,
     )
 
@@ -407,6 +448,7 @@ def execute_research(
     dry_output = output if output is not None else config.output_dir / "(dry-run)"
 
     try:
+        mcp_servers = _merge_config_mcps(config, mcp_servers)
         ctx_for_kwargs = _build_run_context(
             query=display_query,
             config=config,
@@ -460,9 +502,8 @@ def execute_research(
     started_at = datetime.now(_UTC)
     try:
         create_result = client.interactions.create(**kwargs)
-    except Exception as exc:  # pragma: no cover - surface SDK errors as GdrError
-        console.print(f"[red]Failed to start research:[/red] {exc}")
-        raise typer.Exit(code=5) from exc
+    except Exception as exc:
+        raise NetworkError(f"Failed to start research: {exc}") from exc
 
     try:
         create_outcome = _consume_create_result(
@@ -477,10 +518,10 @@ def execute_research(
 
     interaction_id = create_outcome.interaction_id
     if not interaction_id:
-        console.print("[red]API returned no interaction id; cannot proceed.[/red]")
-        raise typer.Exit(code=5)
-
-    console.print(f"[green]Research started.[/green]  id=[dim]{interaction_id}[/dim]")
+        if create_outcome.interrupted:
+            console.print("[yellow]Interrupted before the API returned an id.[/yellow]")
+            raise typer.Exit(code=EXIT_INTERRUPTED)
+        raise NetworkError("API returned no interaction id; cannot proceed.")
 
     final_output_dir = _allocate_output_dir(
         root=config.output_dir,
@@ -493,17 +534,38 @@ def execute_research(
 
     ctx = ctx_for_kwargs.model_copy(update={"output_dir": final_output_dir})
 
-    _finalize_and_render(
-        client=client,
+    # Record the run the moment it is addressable. Recovery commands
+    # (`gdr ls` / `status` / `resume`) must see interrupted, failed, and
+    # timed-out runs — not just the ones that finished cleanly. The
+    # terminal append at the end overwrites this row (last write wins).
+    _record_run(
+        interaction={"id": interaction_id, "status": STATUS_IN_PROGRESS},
         ctx=ctx,
-        interaction_id=interaction_id,
-        final_output_dir=final_output_dir,
-        policy=policy,
         started_at=started_at,
-        console=console,
-        query=display_query,
-        fallback_outputs=create_outcome.fallback_outputs,
+        finished_at=None,
     )
+
+    if create_outcome.interrupted:
+        _print_interrupted(console, interaction_id)
+        raise typer.Exit(code=EXIT_INTERRUPTED)
+
+    console.print(f"[green]Research started.[/green]  id=[dim]{interaction_id}[/dim]")
+
+    try:
+        _finalize_and_render(
+            client=client,
+            ctx=ctx,
+            interaction_id=interaction_id,
+            final_output_dir=final_output_dir,
+            policy=policy,
+            started_at=started_at,
+            console=console,
+            query=display_query,
+            fallback_outputs=create_outcome.fallback_outputs,
+        )
+    except KeyboardInterrupt:
+        _print_interrupted(console, interaction_id)
+        raise typer.Exit(code=EXIT_INTERRUPTED) from None
 
 
 def _build_request_kwargs(
@@ -569,17 +631,24 @@ def _finalize_and_render(
 
     1. Call ``.get(id=...)`` once — if terminal, use it.
     2. Otherwise, the run is still going (most likely because we just
-       streamed through the normal path where ``interaction.complete``
+       streamed through the normal path where the completion event
        arrives before ``status`` flips in the ``.get`` projection, or
        because we disconnected mid-stream). Fall through to the Rich
        live-status polling helper until terminal.
-    3. Write artifacts, append a Record, print the paths.
+    3. Write artifacts and the terminal Record for EVERY terminal state —
+       a failed run's transcript and metadata are exactly what you want
+       for a post-mortem — then exit 0 only if it actually completed.
     """
+    failure: GdrError | None = None
     try:
-        latest = client.interactions.get(id=interaction_id)
-        status = getattr(latest, "status", None) or (
-            latest.get("status") if isinstance(latest, dict) else None
-        )
+        try:
+            latest = client.interactions.get(id=interaction_id)
+        except Exception as exc:
+            raise NetworkError(
+                f"Failed to fetch interaction {interaction_id}: {exc}. "
+                f"The research may still be running — try `gdr resume {interaction_id}`."
+            ) from exc
+        status = get_field(latest, "status")
         interaction = (
             latest
             if status in TERMINAL_STATUSES
@@ -590,11 +659,14 @@ def _finalize_and_render(
                 query=query,
             )
         )
-        interaction = _with_fallback_outputs(interaction, fallback_outputs)
-        finished_at = datetime.now(_UTC)
-    except GdrError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=exc.exit_code) from exc
+    except (ResearchFailedError, ResearchCancelledError) as exc:
+        # The poll saw a terminal failure. Re-fetch once (best-effort) so
+        # artifacts capture whatever diagnostics the API exposes.
+        failure = exc
+        interaction = _refetch_terminal(client, interaction_id, fallback_status=exc)
+
+    interaction = _with_fallback_outputs(interaction, fallback_outputs)
+    finished_at = datetime.now(_UTC)
 
     paths = write_artifacts(
         interaction,
@@ -612,7 +684,21 @@ def _finalize_and_render(
         finished_at=finished_at,
     )
 
+    final_status = str(get_field(interaction, "status") or "unknown")
+    if failure is not None or final_status != STATUS_COMPLETED:
+        _print_not_completed(
+            console,
+            status=final_status,
+            interaction=interaction,
+            paths=paths,
+            failure=failure,
+        )
+        raise typer.Exit(code=_exit_code_for_status(final_status, failure))
+
     _print_done(console, paths)
+
+    if ctx.auto_open and stdout_is_tty():
+        typer.launch(str(paths["report"]))
 
 
 def _consume_create_result(
@@ -627,16 +713,17 @@ def _consume_create_result(
     For non-streaming calls the SDK returns a partial Interaction object —
     we pull ``.id`` directly. For streaming calls it returns an iterator
     yielding SSE events; we consume it through the live UI, which extracts
-    the id on the ``interaction.created`` event and surfaces disconnects
-    gracefully by returning the id anyway (the caller polls to finish).
+    the id on the first event and surfaces disconnects gracefully by
+    returning the id anyway (the caller polls to finish).
+
+    Streamed outputs are only offered as a rendering fallback when the
+    stream finished cleanly AND didn't end in a failure status — partial
+    or failed streams must not masquerade as a report.
 
     Raises :class:`StreamError` on an explicit error event.
     """
     if not use_stream:
-        interaction_id = getattr(create_result, "id", None) or (
-            create_result.get("id") if isinstance(create_result, dict) else None
-        )
-        return _CreateOutcome(interaction_id=interaction_id)
+        return _CreateOutcome(interaction_id=get_field(create_result, "id"))
 
     def _on_disconnect(exc: Exception) -> None:
         console.print(
@@ -647,35 +734,80 @@ def _consume_create_result(
     result = stream_with_live_ui(
         create_result, console=console, query=query, on_disconnect=_on_disconnect
     )
+    clean_completion = result.completed_cleanly and result.status in (None, STATUS_COMPLETED)
     return _CreateOutcome(
         interaction_id=result.interaction_id,
-        fallback_outputs=result.streamed_outputs if result.completed_cleanly else (),
+        fallback_outputs=result.streamed_outputs if clean_completion else (),
+        interrupted=result.interrupted,
     )
 
 
 def _with_fallback_outputs(interaction: Any, fallback_outputs: tuple[dict[str, Any], ...]) -> Any:
     """Attach cleanly streamed outputs when the terminal fetch has none."""
-    if not fallback_outputs or _has_outputs(interaction):
+    if not fallback_outputs or bool(get_field(interaction, "outputs")):
         return interaction
 
     outputs = [dict(output) for output in fallback_outputs]
     if isinstance(interaction, dict):
         return {**interaction, "outputs": outputs}
-    return SimpleNamespace(
-        id=getattr(interaction, "id", None),
-        status=getattr(interaction, "status", None),
-        outputs=outputs,
-        usage=getattr(interaction, "usage", None),
-    )
+    return {
+        "id": get_field(interaction, "id"),
+        "status": get_field(interaction, "status"),
+        "outputs": outputs,
+        "usage": get_field(interaction, "usage"),
+        "error": get_field(interaction, "error"),
+    }
 
 
-def _has_outputs(interaction: Any) -> bool:
-    raw = (
-        interaction.get("outputs")
-        if isinstance(interaction, dict)
-        else getattr(interaction, "outputs", None)
+def _refetch_terminal(client: GdrClient, interaction_id: str, *, fallback_status: GdrError) -> Any:
+    """Best-effort re-fetch after the poll reported a terminal failure.
+
+    If the fetch itself fails we synthesize a minimal interaction so
+    artifacts and the record still get written with the right status.
+    """
+    try:
+        return client.interactions.get(id=interaction_id)
+    except Exception:
+        status = (
+            STATUS_CANCELLED
+            if isinstance(fallback_status, ResearchCancelledError)
+            else STATUS_FAILED
+        )
+        return {"id": interaction_id, "status": status}
+
+
+def _exit_code_for_status(status: str, failure: GdrError | None) -> int:
+    if failure is not None:
+        return failure.exit_code
+    if status == STATUS_CANCELLED:
+        return ResearchCancelledError.exit_code
+    # failed, incomplete, or anything else terminal-but-not-completed.
+    return ResearchFailedError.exit_code
+
+
+def _print_not_completed(
+    console: Console,
+    *,
+    status: str,
+    interaction: Any,
+    paths: dict[str, Path],
+    failure: GdrError | None,
+) -> None:
+    detail = error_of(interaction)
+    headline = str(failure) if failure is not None else f"Research ended with status: {status}."
+    console.print(f"[red]{headline}[/red]")
+    if detail:
+        console.print(f"[red]Detail:[/red] {detail}")
+    console.print(f"Partial artifacts (metadata + transcript) saved to: {paths['report'].parent}")
+
+
+def _print_interrupted(console: Console, interaction_id: str) -> None:
+    console.print()
+    console.print(
+        f"[yellow]Interrupted.[/yellow] The research continues server-side.\n"
+        f"  Check on it:  [bold]gdr status {interaction_id}[/bold]\n"
+        f"  Reattach:     [bold]gdr resume {interaction_id}[/bold]"
     )
-    return bool(raw)
 
 
 def _print_dry_run(console: Console, kwargs: dict[str, Any]) -> None:
@@ -702,17 +834,20 @@ def _record_run(
     interaction: Any,
     ctx: RunContext,
     started_at: datetime,
-    finished_at: datetime,
+    finished_at: datetime | None,
     store: Store | None = None,
 ) -> None:
     """Append a Record describing this run to the local store.
 
+    Called twice per run: once with status ``in_progress`` as soon as the
+    interaction id is known (``finished_at=None``), and once with the
+    terminal state. ``JsonlStore`` is last-write-wins per id, so the
+    second append supersedes the first.
+
     The ``store`` parameter is injectable so tests can pass a memory-backed
     fake. In normal use we open the default JsonlStore just-in-time.
     """
-    interaction_id = getattr(interaction, "id", None) or (
-        interaction.get("id") if isinstance(interaction, dict) else None
-    )
+    interaction_id = get_field(interaction, "id")
     if not interaction_id:
         return  # Nothing actionable to record.
 
@@ -721,17 +856,14 @@ def _record_run(
         tools.append("file_search")
     tools.extend("mcp_server" for _ in ctx.mcp_servers)
 
-    total_tokens = getattr(getattr(interaction, "usage", None), "total_tokens", None)
+    total_tokens = get_field(get_field(interaction, "usage"), "total_tokens")
 
     record = Record(
         id=str(interaction_id),
         parent_id=ctx.previous_interaction_id,
         created_at=started_at,
         finished_at=finished_at,
-        status=str(
-            getattr(interaction, "status", None)
-            or (interaction.get("status") if isinstance(interaction, dict) else "unknown")
-        ),
+        status=str(get_field(interaction, "status") or "unknown"),
         agent=ctx.agent,
         query=ctx.query,
         output_dir=ctx.output_dir,
@@ -750,9 +882,8 @@ def _print_done(console: Console, paths: dict[str, Path]) -> None:
     console.print(f"  sources:    {paths['sources']}")
     console.print(f"  metadata:   {paths['metadata']}")
     console.print(f"  transcript: {paths['transcript']}")
-    # Let downstream shell code consume the primary artifact without parsing
-    # the panel — e.g. `PATH=$(gdr research ... --quiet)`. We print the
-    # report path last with no styling so it's the last stdout line when
-    # Rich wraps the rest.
+    # On a pipe, additionally emit the report path unwrapped and unstyled
+    # as the final stdout line, so shell code can grab it with
+    # `gdr research ... | tail -n 1` without parsing the Rich block.
     if not sys.stdout.isatty():
         sys.stdout.write(f"{paths['report']}\n")

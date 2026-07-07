@@ -21,12 +21,22 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from gdr.commands._common import build_client, get_attr_or_key, load_cfg, lookup_record, open_store
+from gdr.commands._common import (
+    build_client,
+    friendly_errors,
+    get_attr_or_key,
+    load_cfg,
+    lookup_record,
+    open_store,
+)
+from gdr.core.normalize import normalized_outputs
+from gdr.errors import NetworkError
 from gdr.ui.progress import format_elapsed
 
 _UTC = timezone.utc
 
 
+@friendly_errors
 def run(
     interaction_id: str = typer.Argument(..., help="Interaction id to query."),
     api_key: str | None = typer.Option(
@@ -44,8 +54,7 @@ def run(
     try:
         interaction = client.interactions.get(id=interaction_id)
     except Exception as exc:
-        console.print(f"[red]Failed to fetch interaction {interaction_id}:[/red] {exc}")
-        raise typer.Exit(code=5) from exc
+        raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     status = str(get_attr_or_key(interaction, "status") or "unknown")
     console.print(f"[bold]Status:[/bold] {_colored_status(status)}")
@@ -97,10 +106,9 @@ def _print_usage(console: Console, interaction: Any) -> None:
 
 
 def _print_last_thought(console: Console, interaction: Any) -> None:
-    outputs = get_attr_or_key(interaction, "outputs") or []
-    last_thought = None
-    for output in outputs:
-        if get_attr_or_key(output, "type") in {"thought", "thought_summary"}:
-            last_thought = get_attr_or_key(output, "summary") or get_attr_or_key(output, "text")
+    last_thought: str | None = None
+    for output in normalized_outputs(interaction):
+        if output["type"] == "thought" and output.get("text"):
+            last_thought = str(output["text"])
     if last_thought:
         console.print(f"[bold]Thought:[/bold] [dim]{last_thought}[/dim]")

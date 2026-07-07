@@ -20,6 +20,7 @@ Example::
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,32 @@ from gdr.constants import AGENT_FAST, DEFAULT_TOOLS, SIMPLE_TOOLS
 from gdr.errors import ConfigError
 
 ENV_PREFIX = "env:"
+
+# `env:VAR` references embedded in longer strings ("Bearer env:TOKEN").
+# The variable name must start a word boundary so strings like
+# "https://env:8080" or "myenv:x" are left alone.
+_EMBEDDED_ENV_RE = re.compile(r"(?<![A-Za-z0-9_])env:([A-Za-z_][A-Za-z0-9_]*)")
+
+# Canonical commented-out config template, shared by `gdr config edit`
+# and `gdr doctor --fix` so the two can't drift apart.
+CONFIG_TEMPLATE = (
+    "# gdr config\n"
+    "# See README for the full list of keys.\n"
+    "#\n"
+    '# api_key = "env:GEMINI_API_KEY"\n'
+    '# default_agent = "deep-research-preview-04-2026"\n'
+    '# output_dir = "~/gdr-reports"\n'
+    "# auto_open = true\n"
+    "# confirm_max = true\n"
+    '# default_tools = ["google_search", "url_context", "code_execution"]\n'
+    '# thinking_summaries = "auto"\n'
+    '# visualization = "auto"\n'
+    "# safe_untrusted = true\n"
+    "#\n"
+    "# [mcp_servers.example]\n"
+    '# url = "https://mcp.example.com"\n'
+    '# headers.Authorization = "Bearer env:EXAMPLE_TOKEN"\n'
+)
 
 # ---------------------------------------------------------------------------
 # Pydantic config models
@@ -117,28 +144,44 @@ class Config(BaseModel):
 
 
 def _expand_env_string(value: str, *, env: dict[str, str]) -> str:
-    """Resolve an env:VAR reference.
+    """Resolve ``env:VAR`` references in a config string.
 
-    For values prefixed with ``env:``, look up ``VAR`` in ``env`` and return
-    the result. Leading/trailing whitespace around the var name is allowed.
-    If the variable is unset, raise ConfigError with a helpful message.
+    Two forms are supported:
 
-    Non-prefixed strings are returned unchanged. Notably, the prefix must be
-    at the very start of the value — embedded ``env:`` tokens are not
-    expanded (too easy to trip over when a legitimate string happens to
-    contain that substring).
+    * Whole-value: ``"env:GEMINI_API_KEY"`` — the entire value is replaced.
+      Leading/trailing whitespace around the var name is allowed.
+    * Embedded: ``"Bearer env:TOKEN"`` — every ``env:VAR`` token inside the
+      string is replaced. The token must start at a word boundary and the
+      var name must look like an identifier, so strings such as
+      ``"https://env:8080"`` are left alone.
+
+    A referenced-but-unset variable raises :class:`ConfigError` — silently
+    sending the literal ``env:TOKEN`` text (the pre-0.2 behavior) made
+    auth failures near-impossible to diagnose.
     """
-    if not value.startswith(ENV_PREFIX):
-        return value
-    var = value[len(ENV_PREFIX) :].strip()
-    if not var:
-        raise ConfigError(
-            f"Empty env reference {value!r}. Use `env:VAR_NAME` to pull from the environment."
-        )
-    resolved = env.get(var)
-    if resolved is None:
-        raise ConfigError(f"Config references env var ${var} but it is not set in the environment.")
-    return resolved
+    if value.startswith(ENV_PREFIX):
+        var = value[len(ENV_PREFIX) :].strip()
+        if not var:
+            raise ConfigError(
+                f"Empty env reference {value!r}. Use `env:VAR_NAME` to pull from the environment."
+            )
+        resolved = env.get(var)
+        if resolved is None:
+            raise ConfigError(
+                f"Config references env var ${var} but it is not set in the environment."
+            )
+        return resolved
+
+    def _substitute(match: re.Match[str]) -> str:
+        var = match.group(1)
+        resolved = env.get(var)
+        if resolved is None:
+            raise ConfigError(
+                f"Config references env var ${var} but it is not set in the environment."
+            )
+        return resolved
+
+    return _EMBEDDED_ENV_RE.sub(_substitute, value)
 
 
 def _walk_and_expand(data: Any, *, env: dict[str, str]) -> Any:

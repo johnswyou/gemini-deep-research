@@ -12,16 +12,16 @@ of the parent run, and want an incremental answer.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
-from gdr.commands._common import load_cfg
+from gdr.commands._common import friendly_errors, load_cfg, stdout_is_tty
 from gdr.commands.research import execute_research
 
 
+@friendly_errors
 def run(
     interaction_id: str = typer.Argument(
         ..., help="Interaction id to use as the parent of the follow-up."
@@ -56,7 +56,7 @@ def run(
     """Ask a follow-up question using a prior interaction as context."""
     console = Console()
     config = load_cfg(config_path)
-    use_stream = stream if stream is not None else _stdout_is_tty()
+    use_stream = stream if stream is not None else stdout_is_tty()
 
     execute_research(
         config=config,
@@ -71,8 +71,3 @@ def run(
         previous_interaction_id=interaction_id,
         api_input=question,
     )
-
-
-def _stdout_is_tty() -> bool:
-    isatty = getattr(sys.stdout, "isatty", None)
-    return bool(isatty()) if callable(isatty) else False

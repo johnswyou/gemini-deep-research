@@ -108,6 +108,9 @@ def build_create_kwargs(
         "agent": ctx.agent,
         "input": _serialize_input(ctx),
         "background": ctx.background,
+        # The docs require store=true for Deep Research; send it explicitly
+        # rather than relying on the backend default.
+        "store": True,
         "agent_config": ctx.agent_config.model_dump(),
     }
     if ctx.stream:

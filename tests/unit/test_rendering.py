@@ -9,8 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from gdr.constants import AGENT_FAST, DEFAULT_TOOLS
 from gdr.core.models import RunContext
 from gdr.core.rendering import (
@@ -24,7 +22,6 @@ from gdr.core.rendering import (
     write_images,
 )
 from gdr.core.security import SecurityPolicy
-from gdr.errors import ConfigError
 
 _UTC = timezone.utc
 
@@ -287,21 +284,25 @@ class TestWriteArtifacts:
         metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
         assert metadata["interaction_id"] == "int-abc-123"
 
-    def test_refuses_to_write_outside_output_root(self, tmp_path: Path) -> None:
+    def test_writes_outside_output_root_when_told_to(self, tmp_path: Path) -> None:
+        # Confinement is an allocation-time decision made by the command
+        # layer (derived paths confined; explicit --output exempt). The
+        # writer must honor whatever directory it is handed — a paid run
+        # must never die at render time on a path-policy technicality.
         interaction = _fake_interaction(outputs=[_text_output("x")])
-        policy = SecurityPolicy(output_root=tmp_path)
-        # This path resolves outside tmp_path.
-        escaping = tmp_path.parent / "escapes"
+        policy = SecurityPolicy(output_root=tmp_path / "root")
+        elsewhere = tmp_path / "elsewhere"
 
-        with pytest.raises(ConfigError):
-            write_artifacts(
-                interaction,
-                ctx=_ctx(escaping),
-                output_dir=escaping,
-                policy=policy,
-                started_at=datetime(2026, 4, 22, tzinfo=_UTC),
-                finished_at=datetime(2026, 4, 22, tzinfo=_UTC),
-            )
+        paths = write_artifacts(
+            interaction,
+            ctx=_ctx(elsewhere),
+            output_dir=elsewhere,
+            policy=policy,
+            started_at=datetime(2026, 4, 22, tzinfo=_UTC),
+            finished_at=datetime(2026, 4, 22, tzinfo=_UTC),
+        )
+        assert paths["report"].is_file()
+        assert paths["report"].parent == elsewhere
 
 
 # ---------------------------------------------------------------------------

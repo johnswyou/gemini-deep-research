@@ -1,0 +1,353 @@
+"""Command-level regression tests for defects found in the 2026-07 review.
+
+Each test here pins a behavior that previously shipped broken:
+
+* ``--max`` must put the Max agent id on the wire.
+* ``--output`` outside the configured root must work (previously the paid
+  run completed and THEN died on confinement, unrendered and unrecorded).
+* A run that failed fast must exit 1, not 0 — and still write artifacts.
+* The local record must exist from the moment the run is addressable, so
+  interrupts and timeouts leave something for ``gdr resume``.
+* ``store=True`` and config-declared MCP servers must reach the request.
+* A malformed config file must exit 4 with a message, not a traceback.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+from typer.testing import CliRunner
+
+from gdr.cli import app
+from gdr.constants import AGENT_MAX
+from gdr.core.persistence import JsonlStore
+
+# ---------------------------------------------------------------------------
+# Harness (mirrors test_research_command.py)
+# ---------------------------------------------------------------------------
+
+
+def _write_config(tmp_path: Path, *, output_dir: Path, extra: str = "") -> Path:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'output_dir = "{output_dir}"\nauto_open = false\nconfirm_max = true\n{extra}',
+        encoding="utf-8",
+    )
+    return path
+
+
+def _install_fake_sdk(mocker: Any, *, created: Any, got: Any) -> MagicMock:
+    fake_interactions = MagicMock()
+    fake_interactions.create.return_value = created
+    fake_interactions.get.return_value = got
+    fake_client = MagicMock()
+    fake_client.interactions = fake_interactions
+    mocker.patch("google.genai.Client", return_value=fake_client)
+    return fake_interactions
+
+
+def _completed(id_: str = "intabcxyz123", *, status: str = "completed") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id_,
+        status=status,
+        outputs=[SimpleNamespace(type="text", text="Body.", annotations=[])],
+        usage=SimpleNamespace(total_tokens=42),
+    )
+
+
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("GDR_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("GDR_CONFIG_PATH", str(tmp_path / "no-such-config.toml"))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+
+def _store(tmp_path: Path) -> JsonlStore:
+    return JsonlStore.open(tmp_path / "state" / "interactions.jsonl")
+
+
+_KEY = "AIzaSy-test-key-1234567890"
+
+
+# ---------------------------------------------------------------------------
+# Wire-shape regressions
+# ---------------------------------------------------------------------------
+
+
+class TestWireShape:
+    def test_max_flag_selects_max_agent_on_the_wire(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "q",
+                "--config",
+                str(cfg),
+                "--api-key",
+                _KEY,
+                "--max",
+                "--no-confirm",
+                "--no-stream",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert fake.create.call_args.kwargs["agent"] == AGENT_MAX
+
+    def test_store_true_is_sent(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake = _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 0
+        assert fake.create.call_args.kwargs["store"] is True
+
+    def test_config_declared_mcp_servers_reach_the_request(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(
+            tmp_path,
+            output_dir=tmp_path / "reports",
+            extra=(
+                "[mcp_servers.deploys]\n"
+                'url = "https://mcp.example.com"\n'
+                'headers.Authorization = "Bearer abc"\n'
+            ),
+        )
+        fake = _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 0
+        tools = fake.create.call_args.kwargs["tools"]
+        mcp_entries = [t for t in tools if t.get("type") == "mcp_server"]
+        assert mcp_entries == [
+            {
+                "type": "mcp_server",
+                "name": "deploys",
+                "url": "https://mcp.example.com",
+                "headers": {"Authorization": "Bearer abc"},
+            }
+        ]
+
+
+# ---------------------------------------------------------------------------
+# --output contract
+# ---------------------------------------------------------------------------
+
+
+class TestOutputOverride:
+    def test_output_outside_configured_root_writes_artifacts(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "root")
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+        elsewhere = tmp_path / "elsewhere" / "run"
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "q",
+                "--config",
+                str(cfg),
+                "--api-key",
+                _KEY,
+                "--no-stream",
+                "--output",
+                str(elsewhere),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert (elsewhere / "report.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Terminal-status exit codes + record lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalStates:
+    def test_fast_failed_run_exits_1_and_still_writes_artifacts(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        failed = SimpleNamespace(id="intfailfast1", status="failed", outputs=[], usage=None)
+        _install_fake_sdk(mocker, created=failed, got=failed)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 1
+        record = _store(tmp_path).find_by_id("intfailfast1")
+        assert record is not None
+        assert record.status == "failed"
+        metadata_files = list((tmp_path / "reports").rglob("metadata.json"))
+        assert len(metadata_files) == 1
+        assert json.loads(metadata_files[0].read_text())["status"] == "failed"
+
+    def test_cancelled_run_exits_2(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        cancelled = SimpleNamespace(id="intcancel1", status="cancelled", outputs=[], usage=None)
+        _install_fake_sdk(mocker, created=cancelled, got=cancelled)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 2
+
+    def test_interrupted_stream_exits_130_and_leaves_in_progress_record(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+
+        def _events() -> Any:
+            yield {
+                "event_type": "interaction.start",
+                "interaction": {"id": "intctrlc1", "status": "in_progress"},
+            }
+            raise KeyboardInterrupt
+
+        fake = _install_fake_sdk(mocker, created=_events(), got=_completed())
+        _ = fake
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--stream"],
+        )
+
+        assert result.exit_code == 130
+        assert "gdr resume intctrlc1" in result.output
+        record = _store(tmp_path).find_by_id("intctrlc1")
+        assert record is not None
+        assert record.status == "in_progress"
+        assert record.finished_at is None
+
+    def test_completed_run_record_supersedes_in_progress_row(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 0
+        store = _store(tmp_path)
+        record = store.find_by_id("intabcxyz123")
+        assert record is not None
+        assert record.status == "completed"
+        assert record.finished_at is not None
+        # Two rows on disk (in_progress + terminal), one live record.
+        raw_lines = (tmp_path / "state" / "interactions.jsonl").read_text().strip().splitlines()
+        assert len(raw_lines) == 2
+        assert len(store) == 1
+
+
+# ---------------------------------------------------------------------------
+# Error boundary
+# ---------------------------------------------------------------------------
+
+
+class TestErrorBoundary:
+    def test_malformed_config_exits_4_without_traceback(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        bad = tmp_path / "bad.toml"
+        bad.write_text("output_dir = [broken\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["research", "q", "--config", str(bad), "--dry-run"])
+
+        assert result.exit_code == 4
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Invalid TOML" in result.output
+
+    def test_create_failure_exits_5(self, runner: CliRunner, tmp_path: Path, mocker: Any) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        fake_interactions = MagicMock()
+        fake_interactions.create.side_effect = RuntimeError("connection reset")
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 5
+        assert "Failed to start research" in result.output
+
+
+# ---------------------------------------------------------------------------
+# auto_open
+# ---------------------------------------------------------------------------
+
+
+class TestAutoOpen:
+    def test_auto_open_launches_report_on_tty(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'output_dir = "{tmp_path / "reports"}"\nauto_open = true\n', encoding="utf-8"
+        )
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+        mocker.patch("gdr.commands.research.stdout_is_tty", return_value=True)
+        launch = mocker.patch("gdr.commands.research.typer.launch")
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 0
+        launch.assert_called_once()
+        assert launch.call_args.args[0].endswith("report.md")
+
+    def test_auto_open_false_never_launches(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")  # auto_open = false
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+        mocker.patch("gdr.commands.research.stdout_is_tty", return_value=True)
+        launch = mocker.patch("gdr.commands.research.typer.launch")
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--no-stream"],
+        )
+
+        assert result.exit_code == 0
+        launch.assert_not_called()

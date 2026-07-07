@@ -246,3 +246,27 @@ class TestEmissionInvariants:
         # Should not raise.
         agg.feed({"event_type": "some.future.event.type", "payload": {}})
         assert agg.interaction_id is None
+
+
+# ---------------------------------------------------------------------------
+# Image flush on completion (2026-07 review: snapshot is an artifact source)
+# ---------------------------------------------------------------------------
+
+
+class TestImageFlushOnComplete:
+    def test_image_chunks_survive_missing_step_stop(self) -> None:
+        agg = StreamAggregator()
+        agg.feed({"event_type": "step.start", "index": 0, "step": {"type": "image"}})
+        agg.feed(
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "image", "data": "aGk="}}
+        )
+        # No step.stop for index 0 — straight to completion.
+        agg.feed(
+            {
+                "event_type": "interaction.completed",
+                "interaction": {"id": "int-img-1", "status": "completed"},
+            }
+        )
+        snapshot = agg.snapshot()
+        assert snapshot.completed_cleanly is True
+        assert snapshot.images == ["aGk="]

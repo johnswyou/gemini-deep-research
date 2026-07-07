@@ -24,8 +24,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from gdr.config import Config, default_config_path, load_config
+from gdr.commands._common import friendly_errors
+from gdr.config import CONFIG_TEMPLATE, Config, default_config_path, load_config
 from gdr.constants import MIN_GENAI_VERSION
+from gdr.core.client import api_key_fingerprint, sdk_version
 from gdr.core.persistence import default_state_dir
 from gdr.errors import ConfigError
 
@@ -36,6 +38,7 @@ CheckStatus = Literal["pass", "fail", "warn"]
 CheckResult = tuple[str, CheckStatus, str]
 
 
+@friendly_errors
 def run(
     fix: bool = typer.Option(
         False,
@@ -91,18 +94,48 @@ def _check_python() -> CheckResult:
 def _check_genai() -> CheckResult:
     try:
         from google import genai  # noqa: PLC0415 — lazy import for startup cost
+
+        _ = genai
     except ImportError:
         return (
             "google-genai installed",
             "fail",
             f"package missing; install google-genai>={MIN_GENAI_VERSION}",
         )
-    version = getattr(genai, "__version__", "unknown")
+    version = sdk_version()
+    if version == "unknown":
+        return (
+            "google-genai installed",
+            "warn",
+            f"version unknown (required >= {MIN_GENAI_VERSION})",
+        )
+    if _version_tuple(version) < _version_tuple(MIN_GENAI_VERSION):
+        return (
+            "google-genai installed",
+            "fail",
+            f"version={version} is older than the required {MIN_GENAI_VERSION} "
+            f"(no Interactions API); run `pip install -U google-genai`",
+        )
     return (
         "google-genai installed",
         "pass",
         f"version={version} (required >= {MIN_GENAI_VERSION})",
     )
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Lenient numeric version key: '1.73.1' -> (1, 73, 1).
+
+    Non-numeric segments (rc tags etc.) terminate the tuple — good enough
+    for a doctor check without a `packaging` dependency.
+    """
+    parts: list[int] = []
+    for segment in version.split("."):
+        digits = "".join(ch for ch in segment if ch.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
 
 
 def _check_config_file(
@@ -138,7 +171,11 @@ def _check_api_key(config: Config | None) -> CheckResult:
             "set GEMINI_API_KEY or `gdr config set api_key env:GEMINI_API_KEY`",
         )
     source = "GEMINI_API_KEY env" if env_key else "config"
-    return "API key available", "pass", f"from {source}, fingerprint {_fingerprint(resolved)}"
+    return (
+        "API key available",
+        "pass",
+        f"from {source}, fingerprint {api_key_fingerprint(resolved)}",
+    )
 
 
 def _check_network() -> CheckResult:
@@ -188,12 +225,6 @@ def _check_state_dir(*, fix: bool) -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def _fingerprint(key: str) -> str:
-    if len(key) < 10:
-        return "****"
-    return f"{key[:4]}…{key[-4:]}"
-
-
 def _render_table(console: Console, results: list[CheckResult]) -> None:
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("Check", style="cyan")
@@ -225,17 +256,4 @@ def _colored_status(status: CheckStatus) -> str:
 
 
 def _write_template(path: Path) -> None:
-    # Duplicated with commands.config intentionally — doctor shouldn't
-    # import from config.py because doing so creates a circular module
-    # dependency through the Typer app registration path.
-    content = (
-        "# gdr config\n"
-        "# See README for the full list of keys.\n"
-        "#\n"
-        '# api_key = "env:GEMINI_API_KEY"\n'
-        '# default_agent = "deep-research-preview-04-2026"\n'
-        '# output_dir = "~/gdr-reports"\n'
-        "# auto_open = true\n"
-        "# confirm_max = true\n"
-    )
-    path.write_text(content, encoding="utf-8")
+    path.write_text(CONFIG_TEMPLATE, encoding="utf-8")

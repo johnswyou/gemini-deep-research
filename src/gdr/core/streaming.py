@@ -35,11 +35,14 @@ final snapshot is available after the stream ends. The UI layer subscribes
 to emissions for live rendering; the research command uses the aggregator's
 final state for logging/diagnostics only.
 
-**The final report is never reconstructed from the stream.** Per the docs,
+**The re-fetched interaction is preferred; the stream is the fallback.**
 ``interaction.completed`` during streaming omits full outputs, so the
 command always re-fetches via ``client.interactions.get(id=...)`` after the
-stream ends (whether cleanly or by disconnect). Partial delta buffers are
-discarded on disconnect. This is the contract the plan committed to.
+stream ends. When that fetch itself comes back without outputs (observed
+on current backends after a clean stream), the completed stream snapshot
+is used as the artifact source instead — see ``snapshot_outputs``. Partial
+buffers from a *disconnected* stream are still discarded; only a cleanly
+completed stream is trusted as a fallback.
 
 Disconnect detection is pushed up to the caller — :meth:`feed` surfaces
 :class:`StreamError` only when an ``error`` event arrives over the wire.
@@ -54,6 +57,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from gdr.core.normalize import get_field as _get
 from gdr.errors import StreamError
 
 # ---------------------------------------------------------------------------
@@ -171,20 +175,6 @@ def _make_builder(index: int, content_type: str | None) -> _Builder:
     if content_type in ("thought", "thought_summary"):
         return _ThoughtBuilder(index=index)
     return _TextBuilder(index=index)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _get(obj: Any, name: str, default: Any = None) -> Any:
-    """Attribute-then-key lookup (mirrors rendering._get)."""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +368,14 @@ class StreamAggregator:
             status = _get(interaction, "status")
             if status:
                 self._status = status
+        # Flush image indexes that never saw a step/content stop — the
+        # snapshot doubles as an artifact source, so buffered image data
+        # must not be lost to a missing stop event.
+        for index in sorted(self._image_chunks_by_index):
+            chunks = self._image_chunks_by_index[index]
+            if chunks:
+                self._images.append("".join(chunks))
+        self._image_chunks_by_index.clear()
         self._completed_cleanly = True
         self._on_event(
             StreamEvent(

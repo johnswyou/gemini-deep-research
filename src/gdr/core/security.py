@@ -120,6 +120,15 @@ def sanitize_slug(text: str, *, max_length: int = _SLUG_MAX_LEN) -> str:
     return truncated or "query"
 
 
+def id_fragment(interaction_id: str, *, length: int = 6) -> str:
+    """Short filesystem-safe fragment of an interaction id.
+
+    Used in output directory names and display labels. Falls back to
+    ``"noid"`` when the id contains no alphanumeric characters.
+    """
+    return re.sub(r"[^A-Za-z0-9]+", "", interaction_id)[:length] or "noid"
+
+
 def ensure_under_root(candidate: Path, root: Path) -> Path:
     """Resolve ``candidate`` and ensure it lives under ``root``.
 
@@ -172,7 +181,9 @@ def redact_sensitive(data: Any) -> Any:
         out: dict[str, Any] = {}
         for key, value in data.items():
             if key == "api_key":
-                out[key] = REDACTED
+                # Leave unset keys visibly unset — masking None would make
+                # a missing key look configured.
+                out[key] = REDACTED if value is not None else None
             elif key == "headers" and isinstance(value, dict):
                 out[key] = _redact_headers(value)
             else:
@@ -223,7 +234,6 @@ class SecurityPolicy:
     """
 
     output_root: Path
-    safe_untrusted: bool = True
     untrusted: bool = False
 
     # -- header / tool validation --------------------------------------
@@ -241,19 +251,6 @@ class SecurityPolicy:
 
     def confine(self, candidate: Path) -> Path:
         return ensure_under_root(candidate, self.output_root)
-
-    def output_subdir(self, slug: str, interaction_id: str) -> Path:
-        """Build a confined subdirectory path under the output root.
-
-        Layout matches the plan: ``<output_root>/<iso_ts>_<slug>_<id6>``.
-        The timestamp component is caller-supplied via the ``slug`` argument
-        when that makes sense; callers typically prefix with a timestamp
-        before calling here (keeps the function single-purpose).
-        """
-        sanitized = sanitize_slug(slug)
-        id_fragment = re.sub(r"[^A-Za-z0-9]+", "", interaction_id)[:6] or "noid"
-        candidate = self.output_root / f"{sanitized}_{id_fragment}"
-        return self.confine(candidate)
 
     # -- redaction -----------------------------------------------------
 

@@ -187,3 +187,59 @@ class TestResume:
             if p.is_dir() and p.name.startswith("original_resumed_")
         ]
         assert len(siblings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Record update on resume (2026-07 review: resume left stale records)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeRecordUpdate:
+    def test_resume_updates_record_status_and_finish_time(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        _, record = _seed_record(tmp_path)
+        completed = SimpleNamespace(
+            id=record.id,
+            status="completed",
+            outputs=[SimpleNamespace(type="text", text="Recovered.", annotations=[])],
+            usage=SimpleNamespace(total_tokens=99),
+        )
+        _install_fake_sdk(mocker, got=completed)
+
+        result = runner.invoke(
+            app,
+            ["resume", record.id, "--config", str(cfg), "--api-key", "AIzaSy-test-key-123456"],
+        )
+
+        assert result.exit_code == 0
+        store = JsonlStore.open(tmp_path / "state" / "interactions.jsonl")
+        updated = store.find_by_id(record.id)
+        assert updated is not None
+        assert updated.status == "completed"
+        assert updated.finished_at is not None
+        assert updated.total_tokens == 99
+        # Fields only the original run knew are preserved.
+        assert updated.query == record.query
+        assert updated.agent == record.agent
+
+    def test_resume_of_failed_interaction_exits_1_with_note(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        _, record = _seed_record(tmp_path)
+        failed = SimpleNamespace(id=record.id, status="failed", outputs=[], usage=None)
+        _install_fake_sdk(mocker, got=failed)
+
+        result = runner.invoke(
+            app,
+            ["resume", record.id, "--config", str(cfg), "--api-key", "AIzaSy-test-key-123456"],
+        )
+
+        assert result.exit_code == 1
+        assert "failed" in result.output
+        store = JsonlStore.open(tmp_path / "state" / "interactions.jsonl")
+        updated = store.find_by_id(record.id)
+        assert updated is not None
+        assert updated.status == "failed"

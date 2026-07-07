@@ -13,7 +13,6 @@ APP_DESCRIPTION: Final[str] = (
 # See https://ai.google.dev/gemini-api/docs/deep-research#supported-versions
 AGENT_FAST: Final[str] = "deep-research-preview-04-2026"
 AGENT_MAX: Final[str] = "deep-research-max-preview-04-2026"
-KNOWN_AGENTS: Final[tuple[str, ...]] = (AGENT_FAST, AGENT_MAX)
 
 # Minimum google-genai SDK version that supports `client.interactions.*`.
 MIN_GENAI_VERSION: Final[str] = "1.55.0"
@@ -46,11 +45,13 @@ ALL_TOOLS: Final[tuple[str, ...]] = SIMPLE_TOOLS + CONFIGURED_TOOLS
 # Default tool set when the user doesn't pass `--tool` flags.
 DEFAULT_TOOLS: Final[tuple[str, ...]] = SIMPLE_TOOLS
 
-# Terminal interaction statuses.
+# Interaction statuses (google-genai 1.73 models the full set:
+# in_progress / requires_action / completed / failed / cancelled / incomplete).
 STATUS_COMPLETED: Final[str] = "completed"
 STATUS_FAILED: Final[str] = "failed"
 STATUS_CANCELLED: Final[str] = "cancelled"
+STATUS_INCOMPLETE: Final[str] = "incomplete"
 STATUS_IN_PROGRESS: Final[str] = "in_progress"
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
+    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_INCOMPLETE}
 )

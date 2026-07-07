@@ -9,12 +9,13 @@ from __future__ import annotations
 
 # Exit code convention:
 #   0   ok (no exception)
-#   1   research failed
+#   1   research failed (or ended incomplete)
 #   2   research cancelled
 #   3   research timed out (60 min cap)
 #   4   auth / config / validation problem
 #   5   network error after retries exhausted
-#   130 user interrupt (raised by Typer / signal handler, not by us)
+#   130 user interrupt (Ctrl+C; raised explicitly by the research command
+#       after printing a resume hint)
 
 
 class GdrError(Exception):

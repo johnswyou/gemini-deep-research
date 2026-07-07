@@ -11,9 +11,9 @@ Responsibilities:
 * Never let the API key leak into logs, repr, or error messages beyond a
   short fingerprint.
 
-Retry and timeout wrappers are deliberately *not* here — they live in
-`gdr.core.retry` (Phase 3). This module stays small and import-cheap so the
-CLI's startup cost and `gdr doctor` remain fast.
+Retry lives where the long waits are — ``gdr.ui.progress.poll_until_complete``
+retries transient poll failures with backoff. This module stays small and
+import-cheap so the CLI's startup cost and `gdr doctor` remain fast.
 """
 
 from __future__ import annotations

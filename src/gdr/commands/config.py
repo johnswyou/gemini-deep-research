@@ -30,7 +30,9 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from gdr.config import Config, default_config_path, load_config
+from gdr.commands._common import friendly_errors
+from gdr.config import CONFIG_TEMPLATE, Config, default_config_path, load_config
+from gdr.core.security import redact_sensitive
 from gdr.errors import ConfigError
 
 if sys.version_info >= (3, 11):
@@ -53,6 +55,7 @@ app = typer.Typer(
 
 
 @app.command("path", help="Print the resolved config file path.")
+@friendly_errors
 def path_cmd(
     config_path: Path | None = typer.Option(
         None, "--config", help="Path to an alternate config TOML."
@@ -70,6 +73,7 @@ def path_cmd(
 
 
 @app.command("get", help="Print a config value or the whole config.")
+@friendly_errors
 def get_cmd(
     key: str | None = typer.Argument(
         None,
@@ -77,18 +81,24 @@ def get_cmd(
         "(e.g. 'default_agent', 'mcp_servers.factset.url'). "
         "Omit to print the full config.",
     ),
+    reveal: bool = typer.Option(
+        False,
+        "--reveal",
+        help="Print secrets (api_key, auth headers) in the clear instead of [REDACTED].",
+    ),
     config_path: Path | None = typer.Option(
         None, "--config", help="Path to an alternate config TOML."
     ),
 ) -> None:
     console = Console()
-    try:
-        config = load_config(path=config_path)
-    except ConfigError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=exc.exit_code) from exc
+    config = load_config(path=config_path)
 
-    data = config.model_dump(mode="json")
+    # Values are printed post-`env:` expansion, so an api_key or auth
+    # header here is the live secret. Redact unless explicitly asked.
+    data: dict[str, Any] = config.model_dump(mode="json")
+    if not reveal:
+        data = redact_sensitive(data)
+
     if key is None:
         _print_pretty(console, data)
         return
@@ -101,7 +111,9 @@ def get_cmd(
     if isinstance(value, (dict, list)):
         _print_pretty(console, value)
     else:
-        console.print(str(value) if value is not None else "")
+        # Plain stdout: scalar values are script food
+        # (`key=$(gdr config get output_dir)`), and Rich would wrap them.
+        typer.echo(str(value) if value is not None else "")
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +121,14 @@ def get_cmd(
 # ---------------------------------------------------------------------------
 
 
-@app.command("set", help="Set a top-level scalar/list key in the config.")
+@app.command("set", help="Set a top-level scalar key in the config.")
+@friendly_errors
 def set_cmd(
     key: str = typer.Argument(
         ...,
         help="Top-level config key (e.g. 'default_agent'). "
-        "Nested keys (mcp_servers.*) are not supported; use `gdr config edit` instead.",
+        "Nested keys (mcp_servers.*) and list keys (default_tools) are not "
+        "supported; use `gdr config edit` instead.",
     ),
     value: str = typer.Argument(
         ...,
@@ -161,6 +175,7 @@ def set_cmd(
 
 
 @app.command("edit", help="Open the config file in $EDITOR.")
+@friendly_errors
 def edit_cmd(
     config_path: Path | None = typer.Option(
         None, "--config", help="Path to an alternate config TOML."
@@ -189,8 +204,6 @@ def edit_cmd(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_SENTINEL = object()
 
 
 def _lookup(data: Any, key: str) -> tuple[Any, bool]:
@@ -305,25 +318,7 @@ def _quote_string(s: str) -> str:
 
 
 def _write_template(path: Path) -> None:
-    template = (
-        "# gdr config\n"
-        "# See README for the full list of keys.\n"
-        "#\n"
-        '# api_key = "env:GEMINI_API_KEY"\n'
-        '# default_agent = "deep-research-preview-04-2026"\n'
-        '# output_dir = "~/gdr-reports"\n'
-        "# auto_open = true\n"
-        "# confirm_max = true\n"
-        '# default_tools = ["google_search", "url_context", "code_execution"]\n'
-        '# thinking_summaries = "auto"\n'
-        '# visualization = "auto"\n'
-        "# safe_untrusted = true\n"
-        "#\n"
-        "# [mcp_servers.example]\n"
-        '# url = "https://mcp.example.com"\n'
-        '# headers.Authorization = "Bearer env:EXAMPLE_TOKEN"\n'
-    )
-    path.write_text(template, encoding="utf-8")
+    path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
 
 
 def _print_pretty(console: Console, data: Any) -> None:
@@ -331,8 +326,3 @@ def _print_pretty(console: Console, data: Any) -> None:
     import json  # noqa: PLC0415 — only used here
 
     console.print_json(json.dumps(data, default=str))
-
-
-# Silence unused-import warnings from the sentinel that we keep around for
-# future "missing key" detection (currently ``_lookup`` returns a bool).
-_ = _SENTINEL

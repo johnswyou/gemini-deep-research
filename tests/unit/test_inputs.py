@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import gdr.core.inputs as inputs_mod
 from gdr.constants import SIMPLE_TOOLS, TOOL_URL_CONTEXT
 from gdr.core.inputs import (
     ensure_url_context_tool,
@@ -298,3 +299,32 @@ class TestValidateVisualization:
     def test_invalid_raises(self) -> None:
         with pytest.raises(ConfigError, match="auto"):
             validate_visualization("maybe")
+
+
+# ---------------------------------------------------------------------------
+# Inline size guard (2026-07 review)
+# ---------------------------------------------------------------------------
+
+
+class TestFileSizeGuard:
+    def test_oversized_file_is_rejected_before_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(inputs_mod, "MAX_INLINE_FILE_BYTES", 10)
+        big = tmp_path / "big.pdf"
+        big.write_bytes(b"x" * 11)
+
+        with pytest.raises(ConfigError) as excinfo:
+            parse_file(big)
+        assert "too large" in str(excinfo.value)
+        assert "--file-search-store" in str(excinfo.value)
+
+    def test_file_at_limit_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(inputs_mod, "MAX_INLINE_FILE_BYTES", 10)
+        ok = tmp_path / "ok.pdf"
+        ok.write_bytes(b"x" * 10)
+
+        part = parse_file(ok)
+        assert part.mime_type == "application/pdf"
