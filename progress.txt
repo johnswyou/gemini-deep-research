@@ -43,6 +43,19 @@ re-learn them.
   background interactions"). `build_create_kwargs` sends `background=False`
   on the `model=` branch (--model follow-ups, smoke); Deep Research agents
   keep `background=True` + `store=True`.
+- **2.x `Interaction` has NO `outputs` and NO `error` field** (verified by
+  model_fields introspection on 2.10.0). Any `get_field(interaction,
+  "outputs")` / `get_field(interaction, "error")` check is dead against
+  real SDK objects — outputs-shaped data only exists in legacy dicts and
+  gdr's own synthetic fallbacks. Failure details live on
+  `ModelOutputStep.error` (code/message/details). `ThoughtStep` carries
+  `summary: list[TextContent]` and NO `content`, so any steps-walker that
+  keys off `step.content` silently drops thoughts.
+- **Contract-test rule:** construct response objects via
+  `google.genai.interactions` model classes or
+  `Interaction.model_validate(<docs-verbatim payload>)` — NEVER
+  hand-written SimpleNamespace/dicts. Hand-written shapes are how bugs
+  A1-A3 in docs/CODE_REVIEW_v0.1.3.md stayed green through 440 tests.
 - **Citations** are `{type:"url_citation", url, title, start/end_index}`;
   **usage** is `total_input_tokens`/`total_output_tokens`/`total_tokens`
   (+ thought/cached/tool). Status Literal gained `budget_exceeded`
@@ -1733,3 +1746,50 @@ overwritten. Hence the RC-first habit for anything risky.
     "kwargs subset of signature params" contract test silently passes
     everything; validate against the typed create-params TypedDicts.
 ---
+
+## 2026-07-07 - Deep code review #2 (v0.1.3, post-remediation)
+- Produced docs/CODE_REVIEW_v0.1.3.md: full-repo review of tree 6618dd2
+  against the Deep Research docs AND the actually-installed google-genai
+  2.10.0 (introspected model_fields / TypedDicts / delta+event literals;
+  drove shipped code with real SDK instances). Review only - no src changes.
+- Gates verified green: ruff + format clean, mypy strict clean, 440 passed
+  / 1 skipped (live-gated).
+- Three CONFIRMED bugs, all "green in mocks, wrong against the real SDK":
+  A1 `_with_fallback_outputs` (research.py:791) checks `outputs`, which no
+  longer exists on 2.x Interaction -> every cleanly-streamed run renders
+  from the stream buffer and the transcript loses the steps timeline;
+  A2 normalize's `_iter_raw_items` skips ThoughtStep (summary, no content)
+  -> `gdr status` "Thought:" line can never fire on 2.x;
+  A3 `error_of` reads nonexistent Interaction.error; real details are on
+  ModelOutputStep.error -> failed runs get empty Detail/metadata error.
+- Behavioral gaps: streamed runs recorded only after the stream ends and
+  the StreamError path loses the id entirely (no record/resume hint);
+  --plan silently drops --file/--url (api_input clobbers the parts list,
+  PlanRequest is text-only); --max --plan never shows the Max confirm;
+  plan refine ignores --max; agent-mode follow-up still unvalidated on 2.x
+  (last live evidence: server 400) and undocumented; ls mislabels
+  gemini-*-preview model follow-ups as "preview".
+- Docs staleness: MCP.md replace-vs-merge note (wrong since 0.1.3),
+  confinement descriptions (README + MCP.md) predate the --output
+  exemption, TROUBLESHOOTING doctor sample still shows 1.73.1/>=1.55.0,
+  wrong Ctrl+C quote + TINY_PNG_B64 pointer, CHANGELOG 0.1.3 overclaims
+  (record-at-id-known, transcript-full-timeline - both false for streamed
+  runs), docs/CODE_REVIEW.md unmarked as historical.
+- Files changed: docs/CODE_REVIEW_v0.1.3.md (new), progress.txt (this
+  entry + new Codebase Patterns bullets).
+- **Learnings for future iterations:**
+  - The Codebase Patterns section ALREADY documented "ThoughtStep has NO
+    content" - but normalize.py was never re-checked against that fact
+    after the migration. When a pattern bullet contradicts shipped code,
+    treat the bullet as a bug report, not trivia.
+  - test_sdk_contract.py constructs some shapes by hand (thought step as
+    dict-with-content, ThoughtStep without summary); a contract test that
+    hand-writes the shape it claims to verify defends nothing. Build every
+    response fixture from the real SDK models.
+  - `_with_fallback_outputs` had zero direct tests; the streaming e2e
+    fakes all expose an `outputs` attr the real SDK lost in 2.x. When a
+    guard checks a field name, grep the SDK model_fields for it.
+  - Introspection recipe that made this cheap:
+    `uv run python -c "import google.genai.interactions as gi; ..."` over
+    model_fields/typing.get_type_hints - no API key needed; Interaction/
+    steps/deltas/events/params are all plain Pydantic + TypedDicts.
