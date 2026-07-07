@@ -1793,3 +1793,50 @@ overwritten. Hence the RC-first habit for anything risky.
     `uv run python -c "import google.genai.interactions as gi; ..."` over
     model_fields/typing.get_type_hints - no API key needed; Interaction/
     steps/deltas/events/params are all plain Pydantic + TypedDicts.
+
+## 2026-07-07 - Review remediation (branch claude/review-remediation-v0.1.3)
+- Remediated every P0-P2 finding plus the P3 consolidation/docs batches
+  from docs/CODE_REVIEW_v0.1.3.md, TDD throughout (RED verified before
+  each fix; contract fixtures built from real SDK models or
+  Interaction.model_validate on docs-verbatim payloads - never
+  hand-written shapes).
+- Commits (this branch): 71ae62b review doc, d005a9a P0-P2 fixes,
+  604c795 small behaviors, d417869 consolidation, 102f86e docs.
+- Key changes:
+  * normalize.has_report_content() is now THE authority gate;
+    _with_fallback_outputs merges (keeps steps/updated) instead of
+    rebuilding; ThoughtStep.summary yields thought items; error_of
+    scans step-level errors.
+  * Streamed runs record in_progress on interaction.created via
+    stream_with_live_ui(on_start=...); StreamError carries
+    .interaction_id; external-cancel during stream exits 2.
+  * PlanRequest.input_parts + requests.serialize_input(text, parts)
+    shared by research + planning; --max --plan confirms up front;
+    follow-up 400 prints --model fallback; plan refine --max.
+  * Record is extra="ignore" (note removed; old rows with note:null
+    keep loading); Store.list_children deleted; one build_client, one
+    colored_status palette, Literal config types end-to-end.
+- Gates: 464 tests passed (440 -> 464), ruff + format + mypy strict
+  clean. Smoke-verified without an API key: dry-run carries file parts
+  in both research and plan kwargs, untrusted strip notice, ls agent
+  labels + budget_exceeded color, doctor table/exit 4, config get,
+  --version.
+- STILL OPEN (needs a live API key): re-validate agent-mode follow-up
+  on 2.x (docs now caveat it either way); consider retiring the legacy
+  content.* stream schema + fixtures; JsonlStore compaction (v1.x).
+- Files changed: src/gdr (13 files), tests (10 files), docs (6 files),
+  CHANGELOG.md, progress.txt.
+- **Learnings for future iterations:**
+  - stream_with_live_ui(on_start=...) is the hook for anything that
+    must happen the moment a streamed run becomes addressable - don't
+    add post-stream bookkeeping for mid-stream facts.
+  - genai APIError exposes the HTTP status as `.code` (int) - the
+    create() error handler classifies 401/403 as ConfigError(4).
+  - Record is deliberately extra="ignore" (unlike the extra="forbid"
+    request models): rows are machine-written across versions; DO NOT
+    flip it back to forbid or old stores stop loading.
+  - Rich tables at width 80 truncate cell text with an ellipsis -
+    assert on stable prefixes ("gemini-3.1") in CLI table tests, never
+    full long values.
+  - uv run from outside the repo needs --project <repo>; the smoke
+    recipe in this entry works without an API key.
