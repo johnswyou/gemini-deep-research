@@ -351,3 +351,80 @@ class TestAutoOpen:
 
         assert result.exit_code == 0
         launch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Streamed usage fallback (2026-07 follow-up round)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamedUsageFallback:
+    def test_record_gets_tokens_from_stream_when_fetch_is_empty(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+
+        events = [
+            {
+                "event_type": "interaction.start",
+                "interaction": {"id": "intusage1", "status": "in_progress"},
+            },
+            {
+                "event_type": "content.delta",
+                "index": 0,
+                "delta": {"type": "text", "text": "Streamed report body."},
+            },
+            {
+                "event_type": "interaction.complete",
+                "interaction": {
+                    "id": "intusage1",
+                    "status": "completed",
+                    "usage": {"total_tokens": 12345},
+                },
+            },
+        ]
+        # Terminal fetch: completed but empty — the v0.1.2 hotfix scenario.
+        empty_fetch = SimpleNamespace(id="intusage1", status="completed", outputs=[], usage=None)
+        _install_fake_sdk(mocker, created=iter(events), got=empty_fetch)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--config", str(cfg), "--api-key", _KEY, "--stream"],
+        )
+
+        assert result.exit_code == 0
+        record = _store(tmp_path).find_by_id("intusage1")
+        assert record is not None
+        assert record.total_tokens == 12345
+        # The rendered report used the streamed fallback text.
+        reports = list((tmp_path / "reports").rglob("report.md"))
+        assert len(reports) == 1
+        assert "Streamed report body." in reports[0].read_text()
+        # metadata.json carries the fallback usage too.
+        metadata = json.loads(next((tmp_path / "reports").rglob("metadata.json")).read_text())
+        assert metadata["usage"] == {"total_tokens": 12345}
+
+    def test_untrusted_flag_is_persisted_on_the_record(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(mocker, created=_completed(), got=_completed())
+
+        result = runner.invoke(
+            app,
+            [
+                "research",
+                "q",
+                "--config",
+                str(cfg),
+                "--api-key",
+                _KEY,
+                "--no-stream",
+                "--untrusted-input",
+            ],
+        )
+
+        assert result.exit_code == 0
+        record = _store(tmp_path).find_by_id("intabcxyz123")
+        assert record is not None
+        assert record.untrusted is True

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `gdr follow-up --model <id>` answers follow-ups with a plain Gemini
+  model (e.g. `gemini-3.1-pro-preview`) instead of re-running a Deep
+  Research agent — faster and far cheaper for clarification questions.
+  Mutually exclusive with `--max`; sends `model=` on the wire with no
+  `agent_config` and no research tools.
+- Follow-ups inherit the parent run's untrusted-input posture (the
+  local record now persists it) and accept `--untrusted-input` to
+  force the stricter mode explicitly.
+- Dropped SSE streams now re-attach via
+  `interactions.get(id=..., stream=True, last_event_id=...)` up to 3
+  times before falling back to polling, so streamed output survives
+  transient disconnects. Token usage reported on the stream's
+  completion event is kept when the terminal fetch omits usage.
+- SDK contract tests: gdr's `create()`/`get()` kwargs are validated
+  against the installed google-genai signatures, and the response
+  adapter against real SDK response types (`Interaction`,
+  `TextContent`, `ThoughtContent`, `Usage`) — the class of drift
+  behind v0.1.1/v0.1.2 now fails in CI instead of in production.
+
+### Security
+
+- CI and release workflow actions are pinned to commit SHAs (the
+  release workflow holds PyPI trusted-publishing permissions).
+
 ### Fixed
 
 - Non-streaming runs, `gdr resume`, `gdr plan`, and `gdr status` now

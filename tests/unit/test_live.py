@@ -216,3 +216,130 @@ class TestStreamWithLiveUI:
         output = con.export_text()
         assert "Analyzing market share data" in output
         assert "image chunk" in output
+
+
+# ---------------------------------------------------------------------------
+# Stream reconnect via last_event_id (2026-07 follow-up round)
+# ---------------------------------------------------------------------------
+
+
+def _console() -> tuple[Console, io.StringIO]:
+    buf = io.StringIO()
+    return Console(file=buf, force_terminal=False, width=120), buf
+
+
+class TestStreamReconnect:
+    def test_dropped_stream_resumes_and_completes_cleanly(self) -> None:
+        def first_leg() -> Any:
+            yield {
+                "event_type": "interaction.start",
+                "interaction": {"id": "int-rc-1", "status": "in_progress"},
+                "event_id": "evt-1",
+            }
+            yield {
+                "event_type": "content.delta",
+                "index": 0,
+                "delta": {"type": "text", "text": "Part one. "},
+                "event_id": "evt-2",
+            }
+            raise ConnectionError("drop")
+
+        second_leg = [
+            {
+                "event_type": "content.delta",
+                "index": 0,
+                "delta": {"type": "text", "text": "Part two."},
+                "event_id": "evt-3",
+            },
+            {
+                "event_type": "interaction.complete",
+                "interaction": {"id": "int-rc-1", "status": "completed"},
+                "event_id": "evt-4",
+            },
+        ]
+        reconnect_calls: list[tuple[str, str | None]] = []
+
+        def reconnect(interaction_id: str, last_event_id: str | None) -> Any:
+            reconnect_calls.append((interaction_id, last_event_id))
+            return iter(second_leg)
+
+        con, _buf = _console()
+        result = stream_with_live_ui(first_leg(), console=con, reconnect=reconnect)
+
+        assert reconnect_calls == [("int-rc-1", "evt-2")]
+        assert result.completed_cleanly is True
+        assert result.interaction_id == "int-rc-1"
+        texts = [o["text"] for o in result.streamed_outputs if o["type"] == "text"]
+        assert texts == ["Part one. Part two."]
+
+    def test_reconnect_budget_exhausts_to_disconnect(self) -> None:
+        def leg() -> Any:
+            yield {
+                "event_type": "interaction.start",
+                "interaction": {"id": "int-rc-2", "status": "in_progress"},
+                "event_id": "evt-1",
+            }
+            raise ConnectionError("drop")
+
+        attempts: list[int] = []
+
+        def reconnect(interaction_id: str, last_event_id: str | None) -> Any:
+            attempts.append(1)
+            return leg()  # each reconnect also drops
+
+        disconnects: list[Exception] = []
+        con, _buf = _console()
+        result = stream_with_live_ui(
+            leg(), console=con, reconnect=reconnect, on_disconnect=disconnects.append
+        )
+
+        assert len(attempts) == 3  # MAX_STREAM_RECONNECTS
+        assert len(disconnects) == 1
+        assert result.completed_cleanly is False
+        assert result.interaction_id == "int-rc-2"
+
+    def test_failing_reconnect_call_falls_back_gracefully(self) -> None:
+        def leg() -> Any:
+            yield {
+                "event_type": "interaction.start",
+                "interaction": {"id": "int-rc-3", "status": "in_progress"},
+            }
+            raise ConnectionError("drop")
+
+        def reconnect(interaction_id: str, last_event_id: str | None) -> Any:
+            raise TypeError("last_event_id unsupported on this SDK")
+
+        disconnects: list[Exception] = []
+        con, _buf = _console()
+        result = stream_with_live_ui(
+            leg(), console=con, reconnect=reconnect, on_disconnect=disconnects.append
+        )
+
+        assert len(disconnects) == 1
+        assert result.completed_cleanly is False
+
+    def test_completion_event_usage_is_captured(self) -> None:
+        events = [
+            {
+                "event_type": "interaction.start",
+                "interaction": {"id": "int-rc-4", "status": "in_progress"},
+            },
+            {
+                "event_type": "content.delta",
+                "index": 0,
+                "delta": {"type": "text", "text": "Body."},
+            },
+            {
+                "event_type": "interaction.complete",
+                "interaction": {
+                    "id": "int-rc-4",
+                    "status": "completed",
+                    "usage": {"total_tokens": 777},
+                },
+            },
+        ]
+        con, _buf = _console()
+        result = stream_with_live_ui(iter(events), console=con)
+
+        assert result.completed_cleanly is True
+        assert result.total_tokens == 777

@@ -147,6 +147,10 @@ class RunContext(BaseModel):
 
     query: str = Field(min_length=1)
     agent: str
+    # When set, the interaction targets a plain model (`model=` on the
+    # wire) instead of a Deep Research agent — used for lightweight
+    # follow-ups. `agent` still carries the same string for display.
+    model: str | None = None
     builtin_tools: tuple[str, ...] = Field(default_factory=tuple)
     mcp_servers: tuple[McpSpec, ...] = Field(default_factory=tuple)
     file_search: FileSearchSpec | None = None
@@ -198,6 +202,9 @@ class Record(BaseModel):
     total_tokens: int | None = None
     tools: tuple[str, ...] = Field(default_factory=tuple)
     note: str | None = None
+    # Whether the run was executed in untrusted-input mode. Persisted so
+    # follow-ups can inherit the parent's security posture.
+    untrusted: bool = False
 
 
 # ---------------------------------------------------------------------------

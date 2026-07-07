@@ -75,6 +75,7 @@ class _CreateOutcome:
     interaction_id: str | None
     fallback_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     interrupted: bool = False
+    fallback_total_tokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +139,14 @@ def _build_run_context(
     input_parts: tuple[InputPart, ...] = (),
     visualization: str | None = None,
     untrusted_input: bool = False,
+    model: str | None = None,
 ) -> RunContext:
     tools = config.default_tools if builtin_tools is None else builtin_tools
     effective_visualization = visualization if visualization is not None else config.visualization
     return RunContext(
         query=query,
-        agent=_resolve_agent(config, use_max=use_max),
+        agent=model if model is not None else _resolve_agent(config, use_max=use_max),
+        model=model,
         builtin_tools=tools,
         mcp_servers=mcp_servers,
         file_search=file_search,
@@ -424,14 +427,19 @@ def execute_research(
     input_parts: tuple[InputPart, ...] = (),
     visualization: str | None = None,
     untrusted_input: bool = False,
+    model: str | None = None,
 ) -> None:
     """Run the full submit → stream/poll → render pipeline.
 
-    Shared between ``gdr research`` (with or without ``--plan``) and
-    ``gdr plan approve``. When ``previous_interaction_id`` is set, the
-    created interaction inherits the plan context and ``api_input``
-    (typically ``"Plan looks good!"``) replaces the display query on the
-    wire.
+    Shared between ``gdr research`` (with or without ``--plan``),
+    ``gdr plan approve``, and ``gdr follow-up``. When
+    ``previous_interaction_id`` is set, the created interaction inherits
+    the parent context and ``api_input`` (e.g. ``"Plan looks good!"``)
+    replaces the display query on the wire.
+
+    ``model`` switches the run to a plain Gemini model instead of a Deep
+    Research agent (lightweight follow-ups): ``model=`` on the wire, no
+    ``agent_config``, no builtin/config tools, no Max confirmation.
 
     ``plan_mode_for_dry_run`` is set by ``run`` when ``--plan --dry-run``
     is combined; it makes the printed kwargs describe the *plan* phase
@@ -448,7 +456,12 @@ def execute_research(
     dry_output = output if output is not None else config.output_dir / "(dry-run)"
 
     try:
-        mcp_servers = _merge_config_mcps(config, mcp_servers)
+        if model is None:
+            mcp_servers = _merge_config_mcps(config, mcp_servers)
+        elif builtin_tools is None:
+            # Plain-model follow-ups are lightweight Q&A over existing
+            # context: no research tools unless explicitly requested.
+            builtin_tools = ()
         ctx_for_kwargs = _build_run_context(
             query=display_query,
             config=config,
@@ -462,6 +475,7 @@ def execute_research(
             input_parts=input_parts,
             visualization=visualization,
             untrusted_input=untrusted_input,
+            model=model,
         )
         kwargs, stripped = _build_request_kwargs(
             ctx_for_kwargs,
@@ -511,6 +525,7 @@ def execute_research(
             use_stream=use_stream,
             console=console,
             query=display_query,
+            client=client,
         )
     except StreamError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -562,6 +577,7 @@ def execute_research(
             console=console,
             query=display_query,
             fallback_outputs=create_outcome.fallback_outputs,
+            fallback_total_tokens=create_outcome.fallback_total_tokens,
         )
     except KeyboardInterrupt:
         _print_interrupted(console, interaction_id)
@@ -623,6 +639,7 @@ def _finalize_and_render(
     console: Console,
     query: str,
     fallback_outputs: tuple[dict[str, Any], ...] = (),
+    fallback_total_tokens: int | None = None,
 ) -> None:
     """Fetch authoritative outputs, render artifacts, record, announce.
 
@@ -665,7 +682,9 @@ def _finalize_and_render(
         failure = exc
         interaction = _refetch_terminal(client, interaction_id, fallback_status=exc)
 
-    interaction = _with_fallback_outputs(interaction, fallback_outputs)
+    interaction = _with_fallback_outputs(
+        interaction, fallback_outputs, fallback_total_tokens=fallback_total_tokens
+    )
     finished_at = datetime.now(_UTC)
 
     paths = write_artifacts(
@@ -707,14 +726,16 @@ def _consume_create_result(
     use_stream: bool,
     console: Console,
     query: str,
+    client: GdrClient | None = None,
 ) -> _CreateOutcome:
     """Extract the interaction id from ``client.interactions.create()``.
 
     For non-streaming calls the SDK returns a partial Interaction object —
     we pull ``.id`` directly. For streaming calls it returns an iterator
-    yielding SSE events; we consume it through the live UI, which extracts
-    the id on the first event and surfaces disconnects gracefully by
-    returning the id anyway (the caller polls to finish).
+    yielding SSE events; we consume it through the live UI. A dropped
+    stream is re-attached via ``interactions.get(id=..., stream=True,
+    last_event_id=...)`` when the client supports it; only after the
+    reconnect budget is spent do we fall back to polling.
 
     Streamed outputs are only offered as a rendering fallback when the
     stream finished cleanly AND didn't end in a failure status — partial
@@ -731,30 +752,55 @@ def _consume_create_result(
             f"falling through to polling.[/yellow]"
         )
 
+    def _reconnect(interaction_id: str, last_event_id: str | None) -> Any:
+        assert client is not None  # guarded by the `reconnect=` argument below
+        kwargs: dict[str, Any] = {"id": interaction_id, "stream": True}
+        if last_event_id:
+            kwargs["last_event_id"] = last_event_id
+        return client.interactions.get(**kwargs)
+
     result = stream_with_live_ui(
-        create_result, console=console, query=query, on_disconnect=_on_disconnect
+        create_result,
+        console=console,
+        query=query,
+        on_disconnect=_on_disconnect,
+        reconnect=_reconnect if client is not None else None,
     )
     clean_completion = result.completed_cleanly and result.status in (None, STATUS_COMPLETED)
     return _CreateOutcome(
         interaction_id=result.interaction_id,
         fallback_outputs=result.streamed_outputs if clean_completion else (),
         interrupted=result.interrupted,
+        fallback_total_tokens=result.total_tokens if clean_completion else None,
     )
 
 
-def _with_fallback_outputs(interaction: Any, fallback_outputs: tuple[dict[str, Any], ...]) -> Any:
-    """Attach cleanly streamed outputs when the terminal fetch has none."""
+def _with_fallback_outputs(
+    interaction: Any,
+    fallback_outputs: tuple[dict[str, Any], ...],
+    *,
+    fallback_total_tokens: int | None = None,
+) -> Any:
+    """Attach cleanly streamed outputs when the terminal fetch has none.
+
+    Also fills in usage from the stream's completion event when the fetch
+    carries none, so streamed runs don't lose their token counts.
+    """
     if not fallback_outputs or bool(get_field(interaction, "outputs")):
         return interaction
 
+    usage = get_field(interaction, "usage")
+    if usage is None and fallback_total_tokens is not None:
+        usage = {"total_tokens": fallback_total_tokens}
+
     outputs = [dict(output) for output in fallback_outputs]
     if isinstance(interaction, dict):
-        return {**interaction, "outputs": outputs}
+        return {**interaction, "outputs": outputs, "usage": usage}
     return {
         "id": get_field(interaction, "id"),
         "status": get_field(interaction, "status"),
         "outputs": outputs,
-        "usage": get_field(interaction, "usage"),
+        "usage": usage,
         "error": get_field(interaction, "error"),
     }
 
@@ -869,6 +915,7 @@ def _record_run(
         output_dir=ctx.output_dir,
         total_tokens=total_tokens,
         tools=tuple(tools),
+        untrusted=ctx.untrusted_input,
     )
 
     target_store = store if store is not None else JsonlStore.open()

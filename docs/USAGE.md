@@ -259,13 +259,26 @@ record, the lot.
 
 ### Flags
 
-A subset of the `gdr research` flags: `--max`,
-`--stream/--no-stream`, `-o/--output`, `--dry-run`, `--api-key`,
-`--no-confirm`, and `--config`. Tool and input flags (`--tool`,
-`--mcp`, `--file`, `--url`, `--file-search-store`, `--visualization`,
-`--untrusted-input`) are not available on follow-ups — the parent
-interaction's context carries over instead. There is no `--plan`
-(follow-ups skip planning).
+A subset of the `gdr research` flags: `--max`, `--model`,
+`--stream/--no-stream`, `-o/--output`, `--untrusted-input`,
+`--dry-run`, `--api-key`, `--no-confirm`, and `--config`. Tool and
+input flags (`--tool`, `--mcp`, `--file`, `--url`,
+`--file-search-store`, `--visualization`) are not available on
+follow-ups — the parent interaction's context carries over instead.
+There is no `--plan` (follow-ups skip planning).
+
+Two execution modes:
+
+* Default — re-runs the full Deep Research agent grounded in the
+  parent context (minutes, ~$1-3).
+* `--model gemini-3.1-pro-preview` — answers with a plain Gemini
+  model instead: fast and cheap, right for "elaborate on section 3"
+  clarifications. Mutually exclusive with `--max`; sends no research
+  tools.
+
+If the parent run executed in untrusted-input mode, the follow-up
+inherits that posture automatically (persisted in the local record);
+`--untrusted-input` forces it when no local record exists.
 
 ### Example
 

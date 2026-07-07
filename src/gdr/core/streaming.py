@@ -200,6 +200,9 @@ class AggregatedSnapshot:
     thoughts: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     completed_cleanly: bool = False
+    # Token usage reported on the completion event, when present. Used
+    # as a fallback when the terminal fetch omits usage.
+    total_tokens: int | None = None
 
 
 class StreamAggregator:
@@ -219,6 +222,8 @@ class StreamAggregator:
         self._interaction_id: str | None = None
         self._status: str | None = None
         self._completed_cleanly = False
+        self._last_event_id: str | None = None
+        self._total_tokens: int | None = None
         self._on_event: Callable[[StreamEvent], None] = on_event or (lambda _e: None)
 
     # -- properties ----------------------------------------------------
@@ -231,6 +236,12 @@ class StreamAggregator:
     def status(self) -> str | None:
         return self._status
 
+    @property
+    def last_event_id(self) -> str | None:
+        """Id of the last processed SSE event — resume point for
+        ``interactions.get(id=..., stream=True, last_event_id=...)``."""
+        return self._last_event_id
+
     def snapshot(self) -> AggregatedSnapshot:
         return AggregatedSnapshot(
             interaction_id=self._interaction_id,
@@ -240,6 +251,7 @@ class StreamAggregator:
             thoughts=list(self._thoughts),
             images=list(self._images),
             completed_cleanly=self._completed_cleanly,
+            total_tokens=self._total_tokens,
         )
 
     # -- ingestion -----------------------------------------------------
@@ -250,6 +262,9 @@ class StreamAggregator:
         Raises :class:`StreamError` on an ``error`` event. Unknown event
         types are ignored (forward-compatible with future SDK additions).
         """
+        event_id = _get(event, "event_id")
+        if event_id:
+            self._last_event_id = str(event_id)
         event_type = _get(event, "event_type")
 
         if event_type in ("interaction.created", "interaction.start"):
@@ -368,6 +383,9 @@ class StreamAggregator:
             status = _get(interaction, "status")
             if status:
                 self._status = status
+            total_tokens = _get(_get(interaction, "usage"), "total_tokens")
+            if total_tokens is not None:
+                self._total_tokens = int(total_tokens)
         # Flush image indexes that never saw a step/content stop — the
         # snapshot doubles as an artifact source, so buffered image data
         # must not be lost to a missing stop event.

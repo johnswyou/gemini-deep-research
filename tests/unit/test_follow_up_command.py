@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +12,8 @@ import pytest
 from typer.testing import CliRunner
 
 from gdr.cli import app
+from gdr.core.models import Record
+from gdr.core.persistence import JsonlStore
 
 
 @pytest.fixture
@@ -129,3 +132,148 @@ class TestFollowUp:
         runs = list((tmp_path / "reports").glob("*_intfu*"))
         assert len(runs) == 1
         assert (runs[0] / "report.md").read_text(encoding="utf-8").startswith("# Tell me more.")
+
+
+def _seed_parent_record(tmp_path: Path, *, untrusted: bool) -> str:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    store = JsonlStore.open(state_dir / "interactions.jsonl")
+    record = Record(
+        id="intparent1",
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        status="completed",
+        agent="deep-research-preview-04-2026",
+        query="Parent query",
+        output_dir=tmp_path / "reports" / "parent",
+        untrusted=untrusted,
+    )
+    store.append(record)
+    return record.id
+
+
+class TestUntrustedInheritance:
+    def test_follow_up_inherits_parent_untrusted_posture(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        parent_id = _seed_parent_record(tmp_path, untrusted=True)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfu-sec", status="in_progress"),
+            got=_fake_completed("intfu-sec"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                parent_id,
+                "Elaborate on section 3",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "inherited from the parent run" in result.output
+        tools = fake.create.call_args.kwargs.get("tools", [])
+        tool_types = {t["type"] for t in tools}
+        assert "code_execution" not in tool_types
+        assert "mcp_server" not in tool_types
+
+    def test_follow_up_of_trusted_parent_keeps_full_tools(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        parent_id = _seed_parent_record(tmp_path, untrusted=False)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfu-ok", status="in_progress"),
+            got=_fake_completed("intfu-ok"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                parent_id,
+                "More please",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 0
+        tool_types = {t["type"] for t in fake.create.call_args.kwargs.get("tools", [])}
+        assert "code_execution" in tool_types
+
+
+class TestModelFollowUp:
+    def test_model_follow_up_sends_model_without_agent_or_tools(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfu-model", status="in_progress"),
+            got=_fake_completed("intfu-model"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "intparent1",
+                "Elaborate on point 2",
+                "--model",
+                "gemini-3.1-pro-preview",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 0
+        kwargs = fake.create.call_args.kwargs
+        assert kwargs["model"] == "gemini-3.1-pro-preview"
+        assert "agent" not in kwargs
+        assert "agent_config" not in kwargs
+        assert "tools" not in kwargs
+        assert kwargs["previous_interaction_id"] == "intparent1"
+
+    def test_model_and_max_are_mutually_exclusive(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path)
+        _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="x", status="in_progress"),
+            got=_fake_completed("x"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "intparent1",
+                "q",
+                "--model",
+                "gemini-3.1-pro-preview",
+                "--max",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 4
+        assert "mutually exclusive" in result.output

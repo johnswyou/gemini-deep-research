@@ -19,7 +19,7 @@ auto-disables the animation and prints updates as flat log lines.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +51,9 @@ class LiveStreamResult:
     completed_cleanly: bool
     streamed_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     interrupted: bool = False
+    # Usage reported by the completion event (fallback when the terminal
+    # fetch omits usage).
+    total_tokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +164,14 @@ class LiveRenderer:
 
 
 DisconnectCallback = Callable[[Exception], None]
+# (interaction_id, last_event_id) -> a fresh SSE event iterable resuming
+# after last_event_id. Raising falls back to the disconnect path.
+ReconnectFn = Callable[[str, str | None], Iterable[Any]]
+
+# How many times a dropped stream is re-attached before giving up and
+# falling back to polling. Streams drop after ~600s server-side, so a
+# long Max run can legitimately need a few reconnects.
+MAX_STREAM_RECONNECTS = 3
 
 
 def stream_with_live_ui(
@@ -169,13 +180,18 @@ def stream_with_live_ui(
     console: Console | None = None,
     query: str = "",
     on_disconnect: DisconnectCallback | None = None,
+    reconnect: ReconnectFn | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> LiveStreamResult:
     """Drive a streaming interaction through the renderer + status UI.
 
-    The passed ``stream`` is iterated exactly once. Per-event exceptions
-    are not caught — only a bulk iteration failure (e.g. the underlying
-    HTTP connection dies) is treated as a disconnect.
+    Per-event exceptions are not caught — only a bulk iteration failure
+    (e.g. the underlying HTTP connection dies) is treated as a
+    disconnect. When ``reconnect`` is provided and the interaction id is
+    known, a dropped stream is re-attached (resuming after the last seen
+    ``event_id``) up to ``MAX_STREAM_RECONNECTS`` times before falling
+    back to the disconnect path, so partial output isn't thrown away
+    over a transient blip.
 
     Returns a :class:`LiveStreamResult` with everything the caller needs
     to continue (via polling fallback if necessary). Raises
@@ -188,12 +204,35 @@ def stream_with_live_ui(
     agg = StreamAggregator(on_event=renderer.handle)
 
     with con.status(renderer.render_status_line(), spinner="dots") as status_widget:
+        reconnects_used = 0
 
         def refresh_status() -> None:
             status_widget.update(renderer.render_status_line())
 
+        def _try_reconnect(exc: Exception) -> Iterator[Any] | None:
+            """Re-attach to the stream, or None to fall back to polling.
+
+            Any failure — the SDK not supporting ``last_event_id``, the
+            call erroring, or the result not being iterable — degrades
+            gracefully to the disconnect path.
+            """
+            nonlocal reconnects_used
+            if reconnect is None or agg.interaction_id is None:
+                return None
+            if reconnects_used >= MAX_STREAM_RECONNECTS:
+                return None
+            reconnects_used += 1
+            con.print(
+                f"[yellow]Stream dropped ({type(exc).__name__}); reconnecting "
+                f"({reconnects_used}/{MAX_STREAM_RECONNECTS})…[/yellow]"
+            )
+            try:
+                return iter(reconnect(agg.interaction_id, agg.last_event_id))
+            except Exception:
+                return None
+
         # The StreamAggregator is push-based; we nudge status updates after
-        # each event so the timer keeps moving even during quiet periods.
+        # each event so the timer keeps moving during active streaming.
         iterator = iter(stream)
         while True:
             try:
@@ -212,9 +251,13 @@ def stream_with_live_ui(
                     interrupted=True,
                 )
             except Exception as exc:
-                # Defensive — httpx, IOError, or any SDK-surfaced transport
-                # exception is treated uniformly as a disconnect. The caller
-                # polls for the authoritative result via .get(id).
+                # httpx, IOError, or any SDK-surfaced transport exception is
+                # treated uniformly as a disconnect: re-attach if we can,
+                # otherwise let the caller poll for the authoritative result.
+                new_stream = _try_reconnect(exc)
+                if new_stream is not None:
+                    iterator = new_stream
+                    continue
                 if on_disconnect is not None:
                     on_disconnect(exc)
                 renderer.finish()
@@ -224,6 +267,7 @@ def stream_with_live_ui(
                     status=agg.status,
                     completed_cleanly=False,
                     streamed_outputs=tuple(snapshot_outputs(snapshot)),
+                    total_tokens=snapshot.total_tokens,
                 )
             agg.feed(event)
             refresh_status()
@@ -236,4 +280,5 @@ def stream_with_live_ui(
         status=agg.status,
         completed_cleanly=snapshot.completed_cleanly,
         streamed_outputs=tuple(snapshot_outputs(snapshot)),
+        total_tokens=snapshot.total_tokens,
     )

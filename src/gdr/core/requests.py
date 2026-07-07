@@ -101,18 +101,29 @@ def build_create_kwargs(
 
     The returned tuple is ``(kwargs, stripped_tools)``. ``stripped_tools`` is
     empty unless the policy removed tools under untrusted-input mode.
+
+    Two wire shapes:
+
+    * **Agent runs** (the default): ``agent=`` + ``agent_config=`` target a
+      Deep Research agent.
+    * **Model runs** (``ctx.model`` set): ``model=`` targets a plain Gemini
+      model — used for lightweight follow-ups. ``agent``/``agent_config``
+      must NOT be sent alongside ``model``.
     """
     tools, stripped = build_tools(ctx, policy)
 
     kwargs: dict[str, Any] = {
-        "agent": ctx.agent,
         "input": _serialize_input(ctx),
         "background": ctx.background,
         # The docs require store=true for Deep Research; send it explicitly
         # rather than relying on the backend default.
         "store": True,
-        "agent_config": ctx.agent_config.model_dump(),
     }
+    if ctx.model is not None:
+        kwargs["model"] = ctx.model
+    else:
+        kwargs["agent"] = ctx.agent
+        kwargs["agent_config"] = ctx.agent_config.model_dump()
     if ctx.stream:
         kwargs["stream"] = True
     if tools:
