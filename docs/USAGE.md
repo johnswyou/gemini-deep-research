@@ -439,7 +439,7 @@ invocations can branch on these.
 | 1 | Research failed (`status=failed`) OR stream error |
 | 2 | Research cancelled (`status=cancelled`) |
 | 3 | Research timed out (60-minute cap) |
-| 4 | Auth / config / validation error |
+| 4 | Auth / config / validation error — including a key the API rejects |
 | 5 | Network error (request failed, or polling failed 5x in a row) |
 | 130 | User Ctrl+C (task may still be running — resume with `gdr resume <id>`) |
 

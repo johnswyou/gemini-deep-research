@@ -43,7 +43,7 @@ on these without parsing stderr.
 | 2 | Research cancelled | Run was cancelled (by user via `gdr cancel <id>` or externally). |
 | 3 | Research timed out | Hit the documented 60-minute cap on a task. |
 | 4 | Auth / config / validation error | Missing/invalid API key, malformed TOML, unknown flag value, bad MCP header, etc. |
-| 5 | Network error | A request failed, or polling failed 5 times in a row (polls retry with backoff first). |
+| 5 | Network error | A request failed, or polling failed 5 times in a row (polls retry with backoff first — except on a rejected key, which is exit 4 immediately). |
 | 130 | User interrupt (Ctrl+C) | Stream or poll was interrupted. Task may still be running — `gdr resume <id>`. |
 
 ---
@@ -73,6 +73,29 @@ Check what `gdr` sees:
 gdr doctor
 # API key available   PASS   from GEMINI_API_KEY env, fingerprint AIza…YVyE
 ```
+
+---
+
+## `the API rejected the request as unauthorized`  (exit 4)
+
+Different from the above: a key *was* found, and the API refused it
+(HTTP 401 or 403). Usually a revoked, expired, or wrong-project key, or
+one pasted with a stray character.
+
+```
+Error: Failed to start research: the API rejected the request as
+unauthorized (…). Check your API key — `gdr doctor` shows which one is
+active.
+```
+
+`gdr doctor` prints a fingerprint of the key actually in use, which is
+the fastest way to spot the "I exported a different key in this shell"
+case.
+
+This is exit **4**, not 5 — credentials are a config problem, not a
+network one. Every SDK call path classifies it the same way (`research`,
+`status`, `resume`, `cancel`, planning), and the polling loop fails fast
+on it rather than spending its five retries: backoff cannot fix a key.
 
 ---
 

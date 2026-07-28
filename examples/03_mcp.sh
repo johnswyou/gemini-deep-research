@@ -30,9 +30,10 @@ gdr research \
   --no-confirm \
   "Summarize our last 10 production deploys and flag any rollbacks"
 
-# Dry-run variant — prints the full request JSON without calling the API.
+# Dry-run variant — prints the request JSON without calling the API.
 # Useful to verify header assembly and check for injection-protection
-# rejections before spending tokens.
+# rejections before spending tokens. Auth header *values* print as
+# [REDACTED]; add --reveal if you need to eyeball the token itself.
 #
 #   gdr research --dry-run \
 #     --api-key "$GEMINI_API_KEY" \
