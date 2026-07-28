@@ -456,7 +456,7 @@ wheels = [
 
 [[package]]
 name = "gemini-deep-research"
-version = "0.1.4"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "google-genai" },
