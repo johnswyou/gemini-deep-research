@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gdr.cli import app
+from gdr.constants import AGENT_MAX
 from gdr.core.models import Record
 from gdr.core.persistence import JsonlStore
 
@@ -311,3 +312,109 @@ class TestAgentFollowUpRejection:
         )
         assert result.exit_code == 5
         assert "--model" in result.output
+
+
+class TestFollowUpMaxConfirmation:
+    """`--max` on a follow-up is a fresh paid Max run, so it must pass
+    through the same cost gate as `gdr research --max`.
+
+    The gate used to be skipped for anything carrying a
+    `previous_interaction_id` — a stand-in for "the user already approved
+    a plan" that silently disabled the prompt for every follow-up.
+    """
+
+    @staticmethod
+    def _config_with_confirm(tmp_path: Path) -> Path:
+        path = tmp_path / "confirming.toml"
+        path.write_text(
+            f'output_dir = "{tmp_path / "reports"}"\nconfirm_max = true\nauto_open = false\n',
+            encoding="utf-8",
+        )
+        return path
+
+    def test_max_prompts_and_declining_aborts(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = self._config_with_confirm(tmp_path)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfu1", status="in_progress"),
+            got=_fake_completed("intfu1"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "intparent1",
+                "Go deeper on section 3",
+                "--max",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        assert "Heads up" in result.output or "Aborted" in result.output
+        fake.create.assert_not_called()
+
+    def test_no_confirm_skips_the_prompt(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = self._config_with_confirm(tmp_path)
+        fake = _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfu2", status="in_progress"),
+            got=_fake_completed("intfu2"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "intparent1",
+                "Go deeper on section 3",
+                "--max",
+                "--no-confirm",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Heads up" not in result.output
+        assert fake.create.call_args.kwargs["agent"] == AGENT_MAX
+
+    def test_non_max_follow_up_never_prompts(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = self._config_with_confirm(tmp_path)
+        _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfu3", status="in_progress"),
+            got=_fake_completed("intfu3"),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "intparent1",
+                "A cheap clarification",
+                "--no-stream",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1234567890",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Heads up" not in result.output

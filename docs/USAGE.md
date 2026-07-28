@@ -277,6 +277,11 @@ input flags (`--tool`, `--mcp`, `--file`, `--url`,
 follow-ups — the parent interaction's context carries over instead.
 There is no `--plan` (follow-ups skip planning).
 
+`--max` on a follow-up starts a brand-new Max run, so it goes through
+the same cost confirmation as `gdr research --max`; pass `--no-confirm`
+in scripts. (Before the Unreleased fix this prompt was skipped for every
+follow-up.)
+
 Two execution modes:
 
 * Default — re-runs the full Deep Research agent grounded in the
@@ -462,7 +467,7 @@ All keys are optional; every one has a default.
 | `default_agent` | string | `"deep-research-preview-04-2026"` | Agent used when `--max` is not set. |
 | `output_dir` | path | `~/gdr-reports` | Root for all artifact directories. |
 | `auto_open` | bool | `true` | Open the finished report with the system opener (`open`/`xdg-open`) when stdout is a TTY. |
-| `confirm_max` | bool | `true` | Prompt before running Max agents. |
+| `confirm_max` | bool | `true` | Prompt before running Max agents (`gdr research --max` and `gdr follow-up --max`). |
 | `default_tools` | list\[string\] | `["google_search", "url_context", "code_execution"]` | Tools enabled when no `--tool` flags are passed. |
 | `thinking_summaries` | `"auto"` or `"none"` | `"auto"` | Whether the agent produces thought summaries. |
 | `visualization` | `"auto"` or `"off"` | `"auto"` | Chart/infographic generation. |

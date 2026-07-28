@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `research`, `status`, `resume`, `cancel`, and the planning flow. The
   polling loop no longer burns five retries with backoff on a rejected
   key before giving up.
+- **`gdr follow-up --max` asks for cost confirmation.** The Max gate was
+  skipped for any run carrying a `previous_interaction_id`, which was
+  meant to mean "the user already approved a plan" but also matched
+  every follow-up — so `--max` started a fresh Max run with no prompt.
+  Consent is now passed explicitly by the flows that have it.
+
+### Changed
+
+- `gdr follow-up --max` prompts before starting the run when
+  `confirm_max` is enabled (the default). **Scripts that relied on the
+  missing prompt must pass `--no-confirm`**, exactly as
+  `gdr research --max` already requires.
 
 ### Testing
 
