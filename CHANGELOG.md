@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Works through section B of `docs/CODE_REVIEW_v0.1.4.md` — the
-lower-priority hardening left open when 0.2.0 shipped.
+## [0.3.0] - 2026-07-28
+
+Closes section B of `docs/CODE_REVIEW_v0.1.4.md` — the lower-priority
+hardening left open when 0.2.0 shipped. Nothing in that review is
+outstanding now.
+
+Minor rather than patch: two artifacts change shape. `transcript.json`
+stops carrying inline base64, and the local history file is pruned to
+the newest 5000 runs. Both are filed under **Fixed**/**Changed**
+because the old behavior was a defect, but anything parsing those files
+should read the entries below before upgrading.
 
 ### Security
 
@@ -34,7 +43,6 @@ lower-priority hardening left open when 0.2.0 shipped.
   an id, so this is hardening for replayed/raw-dict streams rather than
   a bug anyone has hit — losing the id costs the caller the
   `gdr resume` hint.
-
 - **`interactions.jsonl` no longer grows without bound.** Every run
   appends its id twice (`in_progress`, then the terminal row) and
   nothing ever reclaimed the superseded lines, so the local history
@@ -355,7 +363,8 @@ Deep Research / Deep Research Max via the Gemini Interactions API.
   trademarks of Google LLC, used nominatively throughout.
 - 348 unit tests, 93% line coverage, Ruff + Mypy strict clean.
 
-[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/johnswyou/gemini-deep-research/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/johnswyou/gemini-deep-research/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/johnswyou/gemini-deep-research/compare/v0.1.2...v0.1.3
