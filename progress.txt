@@ -2046,3 +2046,45 @@ overwritten. Hence the RC-first habit for anything risky.
     is the tell that an 18-parameter function is carrying policy it should
     be handed - if this grows again, hoist the flags into a RunSpec value
     object before adding the 19th.
+
+## 2026-07-28 - Release v0.2.0 (review remediation)
+- Merged PR #4 (merge commit ede6825, three-commit split preserved), cut
+  and shipped v0.2.0 following the documented flow: CHANGELOG Unreleased
+  -> [0.2.0] - 2026-07-28 (+ fresh empty Unreleased + compare links),
+  version bumped in pyproject.toml AND src/gdr/__init__.py,
+  `chore: release v0.2.0` (e3a540c) pushed, CI green on the release
+  commit (8-job matrix), tag v0.2.0 pushed.
+- **MINOR bump, not patch.** `gdr follow-up --max` now stops to ask for
+  cost confirmation; a run that previously started unattended changes
+  behavior for anyone scripting it. Semver-wise that is not a patch even
+  though the change is filed as a bugfix. `--no-confirm` restores the old
+  flow, and the CHANGELOG says so under `### Changed`.
+- Release workflow 30384594333 succeeded end-to-end: version guard,
+  build, GitHub Release (wheel + sdist attached, not prerelease), Publish
+  to PyPI. Verified after the fact rather than trusting the green check:
+  PyPI JSON API shows 0.2.0 with both files, and a clean-room
+  `uvx --from gemini-deep-research==0.2.0 gdr --version` printed
+  `gdr 0.2.0` on the first attempt (no index lag this time - contrast
+  the v0.1.4 entry, where the simple index lagged ~a minute).
+- Pre-flight before tagging: versions matched, 483 tests + ruff + format
+  + mypy strict green, `uv build` + twine check PASSED, sdist leakage
+  scan clean (the only "progress" hits are src/gdr/ui/progress.py and its
+  test - progress.txt/CLAUDE.md/docs/CODE_REVIEW* are NOT packaged), and
+  the packaged `__version__` was read back out of the sdist.
+- **Learnings for future iterations:**
+  - Splitting one working tree into N reviewable commits without
+    `git add -p` (interactive flags are unavailable in this harness):
+    back up every modified file, `git checkout HEAD -- <later-commit
+    files>`, hand-build the intermediate version of any file whose hunks
+    span commits (here research.py, test_sdk_contract.py, CHANGELOG.md,
+    USAGE.md), commit, then restore from the backup for the next one.
+    Finish by diffing the tip against the backup to prove nothing was
+    lost in the shuffle.
+  - Verify the gates at EVERY commit, not just the tip - `git checkout
+    <sha>` + ruff/mypy/pytest in a loop. A split that is green only at
+    the end is not bisectable, and the whole point of splitting was to
+    make the behavior change reviewable in isolation.
+  - The `gh run list --workflow Release --limit 1` registration-lag trap
+    from the v0.1.4 entry is real and recurred: 20s after the tag push
+    the v0.2.0 run existed but was not first. Matching on
+    `headBranch == <tag>` is the reliable selector.
