@@ -13,9 +13,16 @@ suite cannot:
 * the response adapter extracts text from whatever shape the live API
   actually returns (the empty-``outputs`` question behind v0.1.2).
 
-A full Deep Research validation (real `gdr research`, `--model`
-follow-up, stream reconnect) is a manual checklist — see the release
-runbook — since those runs cost dollars and minutes.
+What this does NOT cover, because it uses a plain model with
+``stream=False``: the streaming aggregator (including which step types
+may contribute report text), Deep Research agent behavior, MCP tools on
+the wire, and the artifact writers. Validating those means a real
+``gdr research`` run — dollars and minutes — so it stays manual:
+
+1. ``gdr research "<something small>"`` — streamed; check `report.md`,
+   and that `transcript.json` carries no base64 while `images/` does.
+2. ``gdr follow-up <id> "<question>" --model gemini-3.1-pro-preview``.
+3. Ctrl+C mid-stream, then ``gdr resume <id>``.
 """
 
 from __future__ import annotations
