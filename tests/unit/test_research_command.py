@@ -1187,8 +1187,8 @@ class TestPlanCarriesInputs:
 class TestMaxPlanConfirmation:
     """`--max --plan` must show the Max cost gate BEFORE the plan
     interaction is created — the plan itself already runs on the Max
-    agent, and the approval step later skips the gate (by then
-    previous_interaction_id is set)."""
+    agent — and must not ask again at execution time (the caller carries
+    the answer forward via ``max_already_confirmed``)."""
 
     def test_declining_max_confirm_aborts_before_any_plan_call(
         self, runner: CliRunner, tmp_path: Path, mocker: Any
@@ -1222,7 +1222,7 @@ class TestMaxPlanConfirmation:
         cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
         sdk = _PlanAndRunSDK(plan_ids=["planmax2"], plan_texts=["Plan."], final_id="runmax2")
         _install_plan_sdk(mocker, sdk)
-        mocker.patch("gdr.commands.research.typer.confirm", return_value=True)
+        confirm = mocker.patch("gdr.commands.research.typer.confirm", return_value=True)
         mocker.patch("gdr.core.planning.typer.prompt", return_value="A")  # approve
 
         result = runner.invoke(
@@ -1243,3 +1243,5 @@ class TestMaxPlanConfirmation:
         assert len(sdk.create_calls) == 2
         assert sdk.create_calls[0]["agent"] == AGENT_MAX
         assert sdk.create_calls[1]["agent"] == AGENT_MAX
+        # Asked once, before the plan — not again at execution time.
+        assert confirm.call_count == 1

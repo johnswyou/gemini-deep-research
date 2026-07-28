@@ -25,12 +25,16 @@ import inspect
 from pathlib import Path
 from typing import Any, get_args
 
+import httpx
 import pytest
+from pydantic import TypeAdapter
 
 from gdr.commands.research import _with_fallback_outputs
 from gdr.constants import STATUS_IN_PROGRESS, TERMINAL_STATUSES
-from gdr.core.models import AgentConfig, FileSearchSpec, McpSpec, RunContext, TextPart
+from gdr.core.client import is_auth_error
+from gdr.core.models import AgentConfig, FileSearchSpec, McpSpec, MediaPart, RunContext, TextPart
 from gdr.core.normalize import error_of, normalized_outputs
+from gdr.core.planning import PlanRequest, build_plan_kwargs
 from gdr.core.rendering import (
     _usage_dict,
     build_report_text,
@@ -141,6 +145,127 @@ class TestCreateKwargsContract:
         gdr_fields = set(AgentConfig().model_dump())
         unknown = gdr_fields - sdk_fields
         assert not unknown, f"AgentConfig sends fields the SDK doesn't know: {unknown}"
+
+
+class TestCreatePayloadContract:
+    """Kwarg *names* are not the wire contract — the *values* are.
+
+    The SDK parses every polymorphic field (tools, input content,
+    agent_config) through a **lenient** open union: a payload that fails
+    its concrete model is not an error, it is silently rewritten to an
+    ``Unknown*`` placeholder that still gets sent. So a malformed tool
+    can leave `create()` happy, leave `--dry-run` looking correct, and
+    still never reach the API — which is exactly how the bare-string
+    ``allowed_tools`` bug shipped. These tests validate what gdr builds
+    against the SDK's own unions and fail on any such downgrade.
+    """
+
+    @staticmethod
+    def _assert_no_downgrades(kwargs: dict[str, Any]) -> None:
+        im = genai_interactions
+
+        for tool in kwargs.get("tools", []):
+            parsed = TypeAdapter(im.Tool).validate_python(tool)
+            assert not isinstance(parsed, im.UnknownTool), (
+                f"the SDK cannot parse this tool and would send an UNKNOWN "
+                f"placeholder instead: {tool}"
+            )
+
+        payload = kwargs["input"]
+        for part in payload if isinstance(payload, list) else []:
+            parsed_part = TypeAdapter(im.Content).validate_python(part)
+            assert not isinstance(parsed_part, im.UnknownContent), (
+                f"the SDK cannot parse this input part: {part}"
+            )
+
+        if "agent_config" in kwargs:
+            parsed_config = TypeAdapter(im.InteractionAgentConfig).validate_python(
+                kwargs["agent_config"]
+            )
+            assert not isinstance(parsed_config, im.UnknownInteractionAgentConfig), (
+                f"the SDK cannot parse this agent_config: {kwargs['agent_config']}"
+            )
+
+    def test_maxed_out_agent_request_survives_sdk_parsing(self, tmp_path: Path) -> None:
+        kwargs, _ = build_create_kwargs(
+            _maxed_out_ctx(tmp_path), SecurityPolicy(output_root=tmp_path)
+        )
+        self._assert_no_downgrades(kwargs)
+
+    def test_multimodal_request_survives_sdk_parsing(self, tmp_path: Path) -> None:
+        ctx = RunContext(
+            query="What is in this document?",
+            agent="deep-research-preview-04-2026",
+            builtin_tools=("google_search",),
+            input_parts=(
+                MediaPart(type="document", data="Zm9v", mime_type="application/pdf"),
+                MediaPart(type="image", data=_TINY_PNG_B64, mime_type="image/png"),
+                TextPart(text="Additional URLs to consider:\nhttps://example.com"),
+            ),
+            output_dir=tmp_path,
+        )
+        kwargs, _ = build_create_kwargs(ctx, SecurityPolicy(output_root=tmp_path))
+        self._assert_no_downgrades(kwargs)
+
+    def test_plan_request_survives_sdk_parsing(self) -> None:
+        kwargs = build_plan_kwargs(
+            PlanRequest(
+                input_text="Do some research on Google TPUs.",
+                agent="deep-research-preview-04-2026",
+                input_parts=(MediaPart(type="document", data="Zm9v", mime_type="application/pdf"),),
+            )
+        )
+        self._assert_no_downgrades(kwargs)
+
+
+class TestErrorClassificationContract:
+    """Pin the shape of the exception the SDK raises for a rejected key.
+
+    `client.interactions` routes every call through the SDK's compat
+    error layer, whose exceptions carry the HTTP status as
+    ``status_code`` — NOT ``code``, which is what an earlier version of
+    the classifier read (and so never matched: a bad key exited 5 as a
+    "network error" instead of the documented 4).
+
+    The private import is deliberate: this is the only place that shape
+    exists, and an import failure here is exactly the signal to re-check
+    `gdr.core.client.is_auth_error` against the new SDK layout.
+    """
+
+    @staticmethod
+    def _sdk_error(status: int) -> BaseException:
+        # Imported here, not at module scope, so a future SDK reshuffle
+        # fails THIS test (the signal to re-check the classifier) instead
+        # of collapsing the whole contract module at import time.
+        from google.genai._gaos.lib.compat_errors import (  # noqa: PLC0415
+            APIError as CompatAPIError,
+        )
+
+        return CompatAPIError.generate(
+            status_code=status,
+            body={"error": {"code": status, "message": "API key not valid.", "status": "PERM"}},
+            message="API key not valid.",
+            response=httpx.Response(
+                status,
+                request=httpx.Request("POST", "https://generativelanguage.googleapis.com/"),
+            ),
+        )
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_real_auth_errors_are_classified_as_auth(self, status: int) -> None:
+        assert is_auth_error(self._sdk_error(status)) is True
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_real_non_auth_errors_are_not_classified_as_auth(self, status: int) -> None:
+        assert is_auth_error(self._sdk_error(status)) is False
+
+    def test_status_is_exposed_as_status_code_not_code(self) -> None:
+        # The regression this whole class exists for. If a future SDK adds
+        # `.code` back, the classifier reads either — but the stubs used by
+        # the command tests must keep mirroring what the SDK really carries.
+        exc = self._sdk_error(401)
+        assert exc.status_code == 401  # type: ignore[attr-defined]
+        assert getattr(exc, "code", None) is None
 
 
 class TestResponseAdapterAgainstRealTypes:

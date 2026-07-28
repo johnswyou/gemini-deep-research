@@ -31,6 +31,7 @@ from gdr.commands._common import (
     open_store,
 )
 from gdr.constants import TERMINAL_STATUSES
+from gdr.core.client import as_auth_error
 from gdr.core.models import Record
 from gdr.core.normalize import normalized_outputs
 from gdr.errors import NetworkError
@@ -57,6 +58,9 @@ def run(
     try:
         interaction = client.interactions.get(id=interaction_id)
     except Exception as exc:
+        auth = as_auth_error(exc, action=f"Failed to fetch interaction {interaction_id}")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     status = str(get_attr_or_key(interaction, "status") or "unknown")

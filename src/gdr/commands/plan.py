@@ -170,9 +170,12 @@ def approve_cmd(
         use_stream=use_stream,
         output=output,
         api_key=api_key,
-        no_confirm=True,  # plans have already been reviewed; no Max prompt
+        no_confirm=False,
         console=console,
         dry_run=dry_run,
         previous_interaction_id=plan_id,
         api_input="Plan looks good!",
+        # Approving a plan you have already read IS the cost decision —
+        # say so explicitly rather than borrowing --no-confirm's meaning.
+        max_already_confirmed=True,
     )

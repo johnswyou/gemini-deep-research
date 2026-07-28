@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP servers with `allowed_tools` are attached again.** gdr sent the
+  allowlist as a list of bare tool names, but the API models it as a
+  list of allowlist objects. The SDK's tool union is *lenient*: rather
+  than erroring, it replaced the **entire** `mcp_server` entry — name,
+  URL, headers and all — with an `UNKNOWN` placeholder, so any server
+  configured with `allowed_tools` was silently never attached to the
+  run. The allowlist now goes out as `[{"tools": [...]}]`.
+- **A rejected API key exits 4 (auth), not 5 (network).** The classifier
+  read `exc.code`, but google-genai's Interactions errors carry the HTTP
+  status on `status_code`, so the auth branch never fired. Auth failures
+  are now classified — and given the "check your API key" hint — in
+  `research`, `status`, `resume`, `cancel`, and the planning flow. The
+  polling loop no longer burns five retries with backoff on a rejected
+  key before giving up.
+- **`gdr follow-up --max` asks for cost confirmation.** The Max gate was
+  skipped for any run carrying a `previous_interaction_id`, which was
+  meant to mean "the user already approved a plan" but also matched
+  every follow-up — so `--max` started a fresh Max run with no prompt.
+  Consent is now passed explicitly by the flows that have it.
+
+### Changed
+
+- `gdr follow-up --max` prompts before starting the run when
+  `confirm_max` is enabled (the default). **Scripts that relied on the
+  missing prompt must pass `--no-confirm`**, exactly as
+  `gdr research --max` already requires.
+
+### Testing
+
+- The SDK contract suite now validates request *payloads*, not just
+  kwarg names: tools, input parts, and `agent_config` are parsed through
+  the SDK's own unions and any `Unknown*` downgrade fails the build.
+  This is the check that would have caught the `allowed_tools` bug.
+- The shape of the SDK's auth exception (`status_code`, not `code`) is
+  pinned by a contract test, so the stubs used elsewhere in the suite
+  can't drift from the real thing again.
+
 ## [0.1.4] - 2026-07-07
 
 ### Fixed

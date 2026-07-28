@@ -94,7 +94,10 @@ headers.X-Workspace = "production"
 * `env:VAR` is expanded at config load time. Missing env vars raise
   `ConfigError`.
 * `allowed_tools` is optional. When set, only the named MCP tools
-  become callable; the rest are filtered server-side.
+  become callable; the rest are filtered server-side. Write it as a
+  plain list of names — gdr translates it to the API's allowlist-object
+  form (`allowed_tools: [{"tools": [...]}]`) on the wire. An empty list
+  means "no restriction", not "allow nothing", and is not sent.
 
 > **Note:** TOML-declared servers are attached to *every* research run
 > and **merge** with CLI `--mcp` flags. On a name collision the CLI
@@ -189,7 +192,8 @@ declaration order.
     {"type": "mcp_server",
      "name": "deploys",
      "url": "https://mcp.example.com",
-     "headers": {"Authorization": "Bearer ..."}}
+     "headers": {"Authorization": "Bearer ..."},
+     "allowed_tools": [{"tools": ["list_deploys"]}]}
   ]
 }
 ```
@@ -197,6 +201,18 @@ declaration order.
 Tests in `tests/unit/test_requests.py::TestCombinedToolsAndMultimodal`
 assert this ordering explicitly; if you notice it has drifted, file
 a bug.
+
+> **Why the payload is checked against the SDK.** The SDK parses `tools`
+> through a *lenient* open union: an entry it cannot validate is not an
+> error — it is quietly rewritten to an `UNKNOWN` placeholder and still
+> sent, so a malformed tool looks fine in `--dry-run` and simply never
+> reaches the agent. That is how a bare-string `allowed_tools` shipped
+> broken. `tests/unit/test_sdk_contract.py::TestCreatePayloadContract`
+> now parses everything gdr builds through those unions and fails on any
+> such downgrade.
+
+Note that `--dry-run` prints gdr's request dict *before* the SDK
+serializes it, so it shows intent, not the literal bytes on the wire.
 
 ---
 

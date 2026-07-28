@@ -42,8 +42,17 @@ def _serialize_mcp(mcp: McpSpec) -> dict[str, Any]:
     }
     if mcp.headers:
         payload["headers"] = dict(mcp.headers)
-    if mcp.allowed_tools is not None:
-        payload["allowed_tools"] = list(mcp.allowed_tools)
+    if mcp.allowed_tools:
+        # The API models `allowed_tools` as a list of allowlist *objects*
+        # ({mode, tools}), not a list of bare names. A bare-string list
+        # fails the SDK's MCPServer model, and its lenient open union then
+        # replaces the entire mcp_server entry with an `UNKNOWN` placeholder
+        # — the server silently never reaches the agent.
+        #
+        # `mode` is deliberately omitted: gdr's config expresses "restrict
+        # to these tools", not a calling policy, and sending e.g. `any`
+        # would force a tool call the user never asked for.
+        payload["allowed_tools"] = [{"tools": list(mcp.allowed_tools)}]
     return payload
 
 

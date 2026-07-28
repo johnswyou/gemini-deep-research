@@ -76,17 +76,51 @@ re-learn them.
   script inherits `SIGINT=SIG_IGN` (Python keeps an inherited ignore), so
   SIGINT tests do nothing. Use `set -m` (job control) so the background job
   gets default SIGINT, then `kill -INT -<pgid>` triggers KeyboardInterrupt.
+- **SDK open unions are LENIENT - invalid payloads are NOT errors.** Every
+  polymorphic field (`tools`, input `content`, `agent_config`) is parsed
+  through a discriminated open union with `lenient=True`: a payload the
+  concrete model rejects is silently rewritten to
+  `{"type":"UNKNOWN","raw":{...},"is_unknown":true}` and STILL SENT. A
+  malformed tool therefore raises nothing, looks correct in `--dry-run`,
+  and simply never reaches the agent (this is exactly how bare-string
+  `allowed_tools` shipped broken). Validate anything gdr builds with
+  `TypeAdapter(gi.Tool | gi.Content | gi.InteractionAgentConfig)` and
+  assert the result is not `gi.Unknown*` - see
+  `test_sdk_contract.py::TestCreatePayloadContract`. Checking that kwarg
+  NAMES are accepted proves nothing about the values.
+- **`--dry-run` prints gdr's pre-SDK dict, NOT the wire body.** It shows
+  intent. Never cite it as evidence of what the API received; round-trip
+  through the SDK models instead.
+- **MCP `allowed_tools` is a list of allowlist OBJECTS**
+  (`[{"mode"?, "tools": [...]}]`), not a list of names. gdr's config keeps
+  the friendly `["a","b"]` form and `core/requests._serialize_mcp`
+  translates. `mode` is deliberately omitted (sending `any` would force a
+  tool call). An empty tuple means "no restriction" - don't emit the key.
+- **Interactions errors carry `.status_code`, NOT `.code`.** They come
+  from `google.genai._gaos.lib.compat_errors`
+  (`AuthenticationError`/`PermissionDeniedError`/...) via `wrap_sdk_error`,
+  not from `google.genai.errors.APIError`. Use
+  `core/client.as_auth_error(exc, action=...)` at every site that turns an
+  SDK exception into a gdr error - it owns the 401/403 -> exit 4 split and
+  the message. `poll_until_complete` short-circuits on it (backoff cannot
+  fix credentials). Build fixtures with
+  `compat_errors.APIError.generate(status_code=..., ...)`; hand-written
+  stubs must mirror `status_code`.
 
 ### Tooling / lint
 - **Ruff bugbear B008:** Typer's `typer.Option(...)` / `typer.Argument(...)`
   in default values trip B008. Fixed via
   `[tool.ruff.lint.flake8-bugbear] extend-immutable-calls = ["typer.Option", "typer.Argument"]`
   in `pyproject.toml`. DO NOT add `# noqa: B008` — use this config.
-- **Ruff PLC0415 (import not at top):** only two exceptions are allowed
+- **Ruff PLC0415 (import not at top):** only three exceptions are allowed
   project-wide. (a) `from google import genai` is lazy-imported inside
   `GdrClient.__init__` so `gdr --help` / `--version` stay fast. Use
   `# noqa: PLC0415` with a comment. (b) `src/gdr/cli.py` has a per-file
-  ignore for PLC0415 (declared in `pyproject.toml`).
+  ignore for PLC0415 (declared in `pyproject.toml`). (c) the private
+  `google.genai._gaos.lib.compat_errors` import in
+  `test_sdk_contract.py::TestErrorClassificationContract` is function-local
+  so an SDK reshuffle fails that one test instead of collapsing the whole
+  contract module at import time.
 - **Ruff RUF001/RUF003 (ambiguous unicode):** en-dash `–` trips in strings
   and comments. Use ASCII hyphen `-`. Em-dash in docstrings is fine per
   existing code (they're not flagged).
@@ -148,6 +182,14 @@ re-learn them.
   `visualization`, `untrusted_input`). The CLI layer parses flags via
   `core/inputs.py` into these types — keep parsing out of
   `execute_research`.
+- **Consent gates take an EXPLICIT flag, never an inferred one.** The Max
+  cost gate reads `max_already_confirmed`, passed by the flows that have
+  actually asked (`research --plan` after its pre-plan prompt, `plan
+  approve` because reading the plan IS the decision). It used to infer
+  consent from `previous_interaction_id is None`, which also matched every
+  `gdr follow-up` and silently disabled the prompt for `follow-up --max`.
+  If a new caller reaches `execute_research`, decide its consent
+  explicitly.
 - **`core/inputs.py` is where CLI flags become domain objects.** Every
   parser raises `ConfigError` (never bare `ValueError`), so the CLI's
   try/except → exit code 4 is uniform. `commands/research.py` stays lean
@@ -1903,3 +1945,104 @@ overwritten. Hence the RC-first habit for anything risky.
   - GitHub is deprecating Node 20 runners; the pinned checkout/setup-uv
     SHAs emit deprecation annotations. Bump the pins (keeping the
     pin-to-SHA convention) before the deprecation becomes an error.
+
+## 2026-07-28 - Deep code review #3 (v0.1.4)
+- Produced docs/CODE_REVIEW_v0.1.4.md: full-repo review of tree 570250c
+  against the current Deep Research / Interactions docs AND the installed
+  google-genai 2.10.0. Review only - no src changes.
+- Gates verified green on this tree: ruff + format clean, mypy strict
+  clean, 464 passed / 1 skipped (live-gated), 92% coverage.
+- Confirmed defects (all reproduced by execution, not reading):
+  A1 HIGH `core/requests.py:45` serializes MCP `allowed_tools` as a list
+  of plain strings; the SDK wants `[{mode, tools}]`, so MCPServer
+  validation fails and the lenient open-union rewrites the ENTIRE
+  mcp_server tool to `{"type":"UNKNOWN","raw":{...},"is_unknown":true}`
+  on the wire - documented config feature (docs/MCP.md:86) is silently a
+  no-op, and --dry-run hides it because it prints the pre-SDK dict.
+  A2 MED `commands/research.py:604` reads `exc.code`; the real error
+  (compat_errors.AuthenticationError via wrap_sdk_error) exposes
+  `.status_code` - invalid keys exit 5 (network) not the documented 4.
+  A3 MED `gdr follow-up --max` never prompts: the Max gate skips whenever
+  `previous_interaction_id` is set, which follow-up always sets.
+  A4 MED test_sdk_contract only diffs kwarg NAMES against the typed
+  create-params; payload values are never validated - that is why A1
+  stayed green (and its fixture at :90 enshrines the broken shape).
+- Verified-sound (drove shipped code with real SDK objects): request
+  round-trip with all tool types + multimodal parts, normalize/render
+  over a real mixed steps[] timeline, stream aggregator over real
+  StepStart/StepDelta/Completed events, get/cancel signatures, plan flow
+  terminal status, UnrecognizedStr forward-compat, Ctrl+C -> 130, CI +
+  release hardening.
+- Files changed: docs/CODE_REVIEW_v0.1.4.md (new), progress.txt.
+- **Learnings for future iterations:**
+  - The kwargs-name contract test is not a wire contract. The cheap real
+    one: `google_genai._normalize_create_body(kwargs)` ->
+    `utils.unmarshal({"body": ...}, models.CreateInteractionRequest)` ->
+    `utils.serialize_request_body(req.body, False, False, "json",
+    models.CreateInteractionRequestBody).content`, then assert
+    `"is_unknown" not in content`. No API key needed. The SDK's open
+    unions are LENIENT - an invalid payload is not an error, it is
+    silently rewritten to an UNKNOWN placeholder and still sent.
+  - `--dry-run` shows gdr's pre-SDK dict, NOT the wire body. Any bug
+    introduced by SDK re-serialization is invisible to it; never treat
+    dry-run output as evidence of what the API receives.
+  - Interactions errors are `google.genai._gaos.lib.compat_errors.*`
+    (AuthenticationError / PermissionDeniedError / ...), NOT
+    `google.genai.errors.APIError`. They carry `.status_code`, `.message`,
+    `.body`, `.response` - there is no `.code`. Build error-classification
+    fixtures with `compat_errors.APIError.generate(status_code=..., ...)`.
+  - Consent gates must take an explicit flag. `previous_interaction_id is
+    None` was standing in for "the user already approved a plan" and
+    quietly disabled the Max prompt for every follow-up.
+
+## 2026-07-28 - Remediation of the v0.1.4 review (A1-A4)
+- Fixed every confirmed defect from docs/CODE_REVIEW_v0.1.4.md, TDD
+  throughout (RED verified before each fix), targeted at the next public
+  release. Section B (dry-run redaction, transcript image bloat, the
+  smaller hardening notes) is deliberately still open.
+- A1 `core/requests._serialize_mcp` now emits
+  `allowed_tools: [{"tools": [...]}]` (was a bare name list, which the
+  SDK's lenient tool union rewrote to an UNKNOWN placeholder, dropping the
+  whole mcp_server entry). Empty allowlists are omitted rather than sent
+  as "allow nothing".
+- A2 new `core/client.http_status_of` / `is_auth_error` / `as_auth_error`;
+  applied in research (create + terminal fetch), status, resume, cancel
+  (fetch + cancel), planning create, and `poll_until_complete` (which no
+  longer retries a rejected key through 5 backoffs). 401/403 -> exit 4
+  with the `gdr doctor` hint; everything else stays exit 5.
+- A3 `execute_research(max_already_confirmed=...)` replaces the
+  `previous_interaction_id is None` inference. `research --plan` sets it
+  after its pre-plan prompt; `plan approve` sets it instead of borrowing
+  `no_confirm=True`. `gdr follow-up --max` now prompts (BEHAVIOR CHANGE -
+  scripts need `--no-confirm`; called out in CHANGELOG).
+- A4 `test_sdk_contract.py::TestCreatePayloadContract` parses gdr's
+  tools/input parts/agent_config through the SDK's own unions and fails on
+  any `Unknown*` downgrade (covers agent, multimodal, and plan requests);
+  `TestErrorClassificationContract` pins that the SDK's auth exception
+  carries `status_code` and no `code`, so the hand-written stubs in the
+  command tests cannot drift from the real class again.
+- Gates: 483 passed (464 -> 483) / 1 skipped, ruff + format + mypy strict
+  clean, 91% coverage. Verified against the real SDK, not just mocks:
+  maxed-out request serializes with no `is_unknown`; a real
+  `AuthenticationError(401)` exits 4 with the key hint; `follow-up --max`
+  answered "n" creates nothing and exits 0. CLI smoke without an API key
+  confirmed the dry-run allowlist shape and the new Max prompt.
+- Files changed: src/gdr (8: core/client.py, core/requests.py,
+  core/planning.py, ui/progress.py, commands/research.py, commands/plan.py,
+  commands/status.py, commands/resume.py, commands/cancel.py), tests (6),
+  CHANGELOG.md, docs/MCP.md, docs/USAGE.md, docs/CODE_REVIEW_v0.1.4.md
+  (remediation banner), progress.txt (this entry + 5 new pattern bullets).
+- **Learnings for future iterations:**
+  - Two of the four defects were single wrong identifiers (`allowed_tools`
+    element shape, `exc.code`) that no amount of mock-based testing could
+    see. The durable fix is not the patch, it is A4: assert gdr's payloads
+    against the SDK's own models. Add to that contract test whenever a new
+    field is put on the wire.
+  - When a test hand-writes the shape it verifies, it tests the fixture.
+    The pattern that works: pin the real shape ONCE in a contract test,
+    then let cheap stubs elsewhere mirror it and cross-reference the
+    contract test by name in a comment.
+  - Fixing A3 required touching every caller of `execute_research`. That
+    is the tell that an 18-parameter function is carrying policy it should
+    be handed - if this grows again, hoist the flags into a RunSpec value
+    object before adding the 19th.

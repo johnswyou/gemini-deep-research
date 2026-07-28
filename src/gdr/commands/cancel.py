@@ -19,6 +19,7 @@ from rich.console import Console
 
 from gdr.commands._common import build_client, friendly_errors, get_attr_or_key, load_cfg
 from gdr.constants import TERMINAL_STATUSES
+from gdr.core.client import as_auth_error
 from gdr.errors import NetworkError
 
 
@@ -40,6 +41,9 @@ def run(
     try:
         current = client.interactions.get(id=interaction_id)
     except Exception as exc:
+        auth = as_auth_error(exc, action=f"Failed to fetch interaction {interaction_id}")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     current_status = str(get_attr_or_key(current, "status") or "unknown")
@@ -61,6 +65,9 @@ def run(
     try:
         cancel(id=interaction_id)
     except Exception as exc:
+        auth = as_auth_error(exc, action=f"Failed to cancel interaction {interaction_id}")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to cancel interaction {interaction_id}: {exc}") from exc
 
     console.print(f"[green]Cancel request sent[/green] for id [dim]{interaction_id}[/dim].")

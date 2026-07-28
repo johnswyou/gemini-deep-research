@@ -37,6 +37,53 @@ _MISSING_KEY_HINT = (
 )
 
 
+# HTTP statuses that mean "these credentials are wrong", not "the network
+# is down" — the difference between documented exit 4 and exit 5.
+_AUTH_STATUSES = frozenset({401, 403})
+
+
+def http_status_of(exc: BaseException) -> int | None:
+    """HTTP status carried by an SDK exception, or None.
+
+    ``client.interactions`` routes every call through google-genai's compat
+    error layer, whose exceptions expose the status as ``status_code``.
+    ``code`` is checked as a fallback because other error surfaces in the
+    same SDK (and older builds) spell it that way — and because some carry
+    a non-numeric ``code`` like ``"api_error"``, only ``int`` values count.
+    """
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    """True when an SDK failure is a credentials/permission rejection."""
+    return http_status_of(exc) in _AUTH_STATUSES
+
+
+def as_auth_error(exc: BaseException, *, action: str) -> ConfigError | None:
+    """Build the auth-flavored :class:`ConfigError` for ``exc``, or None.
+
+    Call sites that turn an SDK exception into a gdr error use this to
+    split auth problems (exit 4, actionable) out of the generic network
+    path (exit 5) without each one re-deriving the message::
+
+        except Exception as exc:
+            auth = as_auth_error(exc, action="Failed to start research")
+            if auth is not None:
+                raise auth from exc
+            raise NetworkError(...) from exc
+    """
+    if not is_auth_error(exc):
+        return None
+    return ConfigError(
+        f"{action}: the API rejected the request as unauthorized ({exc}). "
+        f"Check your API key — `gdr doctor` shows which one is active."
+    )
+
+
 def sdk_version() -> str:
     """Return the installed google-genai SDK version, or 'unknown'."""
     try:

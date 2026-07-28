@@ -31,7 +31,7 @@ from gdr.constants import (
     TERMINAL_STATUSES,
     TOOL_URL_CONTEXT,
 )
-from gdr.core.client import GdrClient
+from gdr.core.client import GdrClient, as_auth_error
 from gdr.core.inputs import (
     ensure_url_context_tool,
     parse_file_search_stores,
@@ -356,6 +356,7 @@ def run(
     # below so the final run inherits plan context.
     previous_interaction_id: str | None = None
     approve_input: str | None = None
+    max_already_confirmed = False
     if use_plan and not dry_run:
         # The Max cost gate must precede the *plan* interaction: the plan
         # itself already runs on the Max agent, and by approval time
@@ -364,6 +365,8 @@ def run(
         if use_max and config.confirm_max and not no_confirm and not _confirm_max(console):
             console.print("[yellow]Aborted.[/yellow]")
             raise typer.Exit(code=0)
+        # Cleared (or not needed) — don't ask a second time at execution.
+        max_already_confirmed = True
         client = build_client(console, api_key=api_key, config=config)
         plan_id = interactive_plan_loop(
             client,
@@ -398,6 +401,7 @@ def run(
         input_parts=extra_parts,
         visualization=vis_literal,
         untrusted_input=effective_untrusted,
+        max_already_confirmed=max_already_confirmed,
     )
 
 
@@ -427,6 +431,7 @@ def execute_research(
     visualization: Visualization | None = None,
     untrusted_input: bool = False,
     model: str | None = None,
+    max_already_confirmed: bool = False,
 ) -> None:
     """Run the full submit → stream/poll → render pipeline.
 
@@ -444,6 +449,11 @@ def execute_research(
     is combined; it makes the printed kwargs describe the *plan* phase
     rather than the execution phase, so users see what the planning call
     would look like.
+
+    ``max_already_confirmed`` says the caller has already put the user
+    through the Max cost gate for this invocation (the ``--plan`` flow
+    confirms before the plan interaction, which is itself billed at Max
+    rates). It suppresses a second prompt — nothing else does.
     """
     policy = SecurityPolicy(
         output_root=config.output_dir,
@@ -501,15 +511,21 @@ def execute_research(
         _print_dry_run(console, kwargs)
         return
 
-    # Max confirmation gate — skip when the user has opted out either per-run
-    # (--no-confirm) or globally (confirm_max = false in config). Also skip
-    # when we're continuing from an approved plan — they've already
-    # consented.
+    # Max confirmation gate — skip when the user has opted out either
+    # per-run (--no-confirm) or globally (confirm_max = false), or when
+    # they already cleared the gate earlier in this invocation
+    # (``max_already_confirmed``, set by the --plan flow).
+    #
+    # Consent is passed in explicitly and never inferred from
+    # ``previous_interaction_id``: that field only means "this run chains
+    # off another interaction", which is also true of every follow-up —
+    # and a `gdr follow-up --max` is a brand-new paid Max run the user has
+    # not agreed to yet.
     if (
         use_max
         and ctx_for_kwargs.confirm_max
         and not no_confirm
-        and previous_interaction_id is None
+        and not max_already_confirmed
         and not _confirm_max(console)
     ):
         console.print("[yellow]Aborted.[/yellow]")
@@ -598,14 +614,12 @@ def _submit_interaction(
     try:
         create_result = client.interactions.create(**kwargs)
     except Exception as exc:
-        # google-genai's APIError carries the HTTP status in `.code`. A
-        # rejected key is an auth problem (documented exit 4), not a
-        # network failure (exit 5).
-        if getattr(exc, "code", None) in (401, 403):
-            raise ConfigError(
-                f"The API rejected the request as unauthorized: {exc}. "
-                f"Check your API key (`gdr doctor` shows which one is active)."
-            ) from exc
+        # A rejected key is an auth problem (documented exit 4), not a
+        # network failure (exit 5). The status lives on `.status_code`;
+        # see gdr.core.client.http_status_of.
+        auth = as_auth_error(exc, action="Failed to start research")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to start research: {exc}") from exc
 
     record_stream_start, recorded_dirs = _make_stream_start_recorder(
@@ -762,6 +776,9 @@ def _finalize_and_render(
         try:
             latest = client.interactions.get(id=interaction_id)
         except Exception as exc:
+            auth = as_auth_error(exc, action=f"Failed to fetch interaction {interaction_id}")
+            if auth is not None:
+                raise auth from exc
             raise NetworkError(
                 f"Failed to fetch interaction {interaction_id}: {exc}. "
                 f"The research may still be running — try `gdr resume {interaction_id}`."

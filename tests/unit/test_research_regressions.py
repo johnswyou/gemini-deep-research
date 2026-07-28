@@ -591,8 +591,11 @@ class TestSmallBehaviors:
         # a network failure (exit 5).
         cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
 
+        # `status_code` mirrors the real google-genai compat error; that
+        # shape is pinned by
+        # test_sdk_contract.py::TestErrorClassificationContract.
         class FakeAuthError(Exception):
-            code = 401
+            status_code = 401
 
         fake_interactions = MagicMock()
         fake_interactions.create.side_effect = FakeAuthError("API key not valid")
@@ -606,6 +609,28 @@ class TestSmallBehaviors:
         )
         assert result.exit_code == 4
         assert "key" in result.output.lower()
+
+    def test_non_auth_create_failure_stays_a_network_error_exit_5(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        # Only 401/403 reclassify; a 500 or a transport blow-up is still
+        # exit 5 so the two failure modes stay distinguishable in scripts.
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+
+        class FakeServerError(Exception):
+            status_code = 500
+
+        fake_interactions = MagicMock()
+        fake_interactions.create.side_effect = FakeServerError("backend on fire")
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            ["research", "q", "--no-stream", "--config", str(cfg), "--api-key", _KEY],
+        )
+        assert result.exit_code == 5
 
     def test_stream_error_after_external_cancel_exits_2(
         self, runner: CliRunner, tmp_path: Path, mocker: Any
