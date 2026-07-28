@@ -25,6 +25,7 @@ of the parent run, and want an incremental answer.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import typer
@@ -37,8 +38,8 @@ from gdr.commands._common import (
     open_store,
     stdout_is_tty,
 )
-from gdr.commands.research import execute_research
-from gdr.errors import ConfigError, NetworkError
+from gdr.commands.research import RunSpec, execute_research
+from gdr.errors import NetworkError
 
 
 @friendly_errors
@@ -100,41 +101,41 @@ def run(
     config = load_cfg(config_path)
     use_stream = stream if stream is not None else stdout_is_tty()
 
-    if model is not None and use_max:
-        raise ConfigError(
-            "--model and --max are mutually exclusive: --model targets a plain "
-            "Gemini model, --max a Deep Research agent."
-        )
+    # Built before any I/O so an impossible flag combination (--model with
+    # --max) fails immediately. RunSpec owns that rule, so a future caller
+    # assembling its own spec cannot skip the check.
+    spec = RunSpec(
+        config=config,
+        display_query=question,
+        api_input=question,
+        previous_interaction_id=interaction_id,
+        model=model,
+        use_max=use_max,
+        untrusted_input=untrusted_input,
+        use_stream=use_stream,
+        output=output,
+        api_key=api_key,
+        no_confirm=no_confirm,
+        dry_run=dry_run,
+        reveal=reveal,
+    )
 
     # Inherit the parent's security posture. A follow-up re-uses the
     # parent's (possibly attacker-influenced) context, so trust must not
     # silently reset just because no new files/URLs are attached.
-    effective_untrusted = untrusted_input
-    parent = lookup_record(open_store(), interaction_id)
+    store = open_store()
+    parent = lookup_record(store, interaction_id)
     if parent is not None and parent.untrusted and not untrusted_input:
-        effective_untrusted = True
+        spec = replace(spec, untrusted_input=True)
         console.print(
             "[dim]Untrusted-input mode inherited from the parent run "
             "(code_execution / mcp_server stay disabled).[/dim]"
         )
 
     try:
-        execute_research(
-            config=config,
-            display_query=question,
-            use_max=use_max,
-            use_stream=use_stream,
-            output=output,
-            api_key=api_key,
-            no_confirm=no_confirm,
-            console=console,
-            dry_run=dry_run,
-            previous_interaction_id=interaction_id,
-            api_input=question,
-            untrusted_input=effective_untrusted,
-            model=model,
-            reveal=reveal,
-        )
+        # The store is already open from the parent lookup above; reuse
+        # it rather than re-reading the whole history.
+        execute_research(spec, console=console, store=store)
     except NetworkError as exc:
         # The Gemini API has been rejecting agent follow-ups on completed
         # research parents with an opaque HTTP 400. Point at the two
