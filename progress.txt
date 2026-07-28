@@ -106,6 +106,15 @@ re-learn them.
   fix credentials). Build fixtures with
   `compat_errors.APIError.generate(status_code=..., ...)`; hand-written
   stubs must mirror `status_code`.
+- **The fetch path and the stream path are twins.** A rule tightened on
+  one belongs on the other. `normalize._BODY_STEP_TYPES` restricts the
+  report body to `model_output` steps on the fetch path;
+  `StreamAggregator._is_body_index` is the streaming half (an index
+  contributes report text only when its start event typed it `"text"` —
+  which `_content_type_from_start_event` yields for `model_output` and
+  for a legacy `text` content block). An index with no start event
+  counts as body on purpose: dropping real report text is worse than
+  the leak.
 
 ### Tooling / lint
 - **Ruff bugbear B008:** Typer's `typer.Option(...)` / `typer.Argument(...)`
@@ -292,6 +301,27 @@ re-learn them.
   stdlib may pick `.jpe` for `image/jpeg`; tests check only the prefix.
 - **Images section goes *between* body and Sources** in `report.md` —
   tests assert "## Images" before "## Sources" ordering.
+- **Artifacts never store the same bytes twice.** `build_transcript`
+  runs `_strip_inline_data`, replacing the `data` of any content item
+  typed `image`/`audio`/`document`/`video` (`_INLINE_DATA_TYPES`, which
+  mirrors the SDK's `Content` union — text is the only member without a
+  `data` field) with `[inline data omitted: N base64 chars]`. `type`,
+  `mime_type`, and `uri` survive. Decoded images live in `images/`. If a
+  new inline-payload content type appears in the SDK, add it to that
+  frozenset or transcripts start bloating again.
+
+### Secret-bearing output
+- **Anything that prints post-`env:`-expansion config redacts by
+  default; the opt-out is a `--reveal` flag.** Three sites follow this
+  now: `gdr config get`, `transcript.json`, and `--dry-run`
+  (`research` / `follow-up` / `plan approve`, all routed through the one
+  `research._print_dry_run` choke point). `security.redact_sensitive`
+  is the only implementation — walks dicts/lists, masks `api_key` and
+  header values whose *name* contains auth/token/key/secret/cookie. It
+  matches on names, not on how secret a value looks, so a
+  custom-named header is NOT masked; say so rather than overclaiming in
+  docs. When adding a command that prints config or request kwargs,
+  wire it through `redact_sensitive` and add `--reveal`.
 
 ### Storage + paths
 - Store: `$GDR_STATE_DIR` → `$XDG_STATE_HOME/gdr/` → `~/.local/state/gdr/`.
@@ -323,10 +353,32 @@ re-learn them.
   touch real user state.
 
 ### Git / commit conventions
-- Attribution is disabled globally per user's settings. Do NOT add
-  `Co-Authored-By: Claude` — the commit message rule explicitly omits
-  it. Commit body format: `<type>: <description>\n\n<body>`. Types used
-  so far: `chore`, `feat`, `feat(core)`. One phase = one commit.
+- Commit body format: `<type>: <description>\n\n<body>`. Types used so
+  far: `chore`, `feat`, `feat(core)`, `fix`, `fix!`, `docs`. One phase =
+  one commit.
+- **Attribution: follow the harness instruction in the current session,
+  not this file.** As of the v0.2.0 cycle the environment requires every
+  commit message to end with `Co-Authored-By: Claude Opus 5 (1M context)
+  <noreply@anthropic.com>`, and the commits on `main` have it. (An
+  earlier note here said the opposite; check `git log -1` if unsure.)
+
+### CI / release workflows
+- **Every action is pinned to a commit SHA** with the tag in a trailing
+  comment (`# v7.0.1`). `release.yml` holds `id-token: write` for PyPI
+  trusted publishing, so a mutable tag there is a package-minting
+  vulnerability. Resolve a SHA with
+  `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha`
+  (deref `.object.type == "tag"` for annotated tags).
+- **Deprecation warnings are annotations, not step output** — they do
+  not show in `gh run view`. Read them with
+  `gh api repos/<owner>/<repo>/commits/<sha>/check-runs --jq
+  '.check_runs[].id'` then `.../check-runs/<id>/annotations`. That is
+  how the Node 20 deprecation on `actions/checkout`/`setup-uv` surfaced.
+- **`uv.lock` records the root package version.** A release version bump
+  that edits only `pyproject.toml` + `__init__.py` leaves the lock
+  stale, and the next `uv run` rewrites it — dirtying a supposedly clean
+  tree. Run `uv lock` as part of the bump. (`uv sync --frozen` in CI
+  tolerated the mismatch, so CI will not catch this for you.)
 
 ---
 
@@ -2088,3 +2140,73 @@ overwritten. Hence the RC-first habit for anything risky.
     from the v0.1.4 entry is real and recurred: 20s after the tag push
     the v0.2.0 run existed but was not first. Matching on
     `headBranch == <tag>` is the reliable selector.
+
+---
+
+## 2026-07-28 (evening) - Section B of the v0.1.4 review
+
+Remediated the lower-priority hardening findings left open when v0.2.0
+shipped, plus the Node 20 action deprecation carried over from v0.1.4.
+Branch `claude/section-b-hardening`; version stays 0.2.0 (entries under
+`## [Unreleased]`).
+
+**What changed**
+
+- `--dry-run` redacts MCP auth headers by default, with a new `--reveal`
+  flag on `gdr research` / `gdr follow-up` / `gdr plan approve`. One
+  choke point (`research._print_dry_run`), one implementation
+  (`security.redact_sensitive`, already used by `gdr config get` and
+  `transcript.json`). The preview announces the masking only when
+  something was actually masked, so a no-secrets dry run reads clean.
+- `transcript.json` no longer duplicates inline base64. New
+  `rendering._strip_inline_data` replaces `data` on image / document /
+  audio / video content with `[inline data omitted: N base64 chars]`.
+  Images are still decoded to `images/`, so nothing is lost.
+- `StreamAggregator` now tracks the content type per step index and only
+  admits text deltas from `model_output` (or an untyped index) into the
+  report buffer - the streaming half of `normalize._BODY_STEP_TYPES`.
+  Latent today (Deep Research only emits text on model_output), closed
+  anyway.
+- `_handle_start` guards its assignments like `_handle_status_update`
+  does, so a second `interaction.created` cannot overwrite or null a
+  known id. Verified with real SDK objects: `InteractionCreatedEvent`
+  *requires* `interaction.id` and `.status`, so this is hardening for
+  the dict-shaped path (fixtures, mocks, raw SSE) and for a replay
+  carrying a different id - not a bug reachable through typed events.
+  Said so in the CHANGELOG rather than overclaiming a fix.
+- `actions/checkout` v4 -> v7.0.1 and `astral-sh/setup-uv` v3 -> v9.0.0
+  in both workflows, still SHA-pinned. This clears the "Node.js 20 is
+  deprecated ... forced to run on Node.js 24" annotation on every job.
+
+**Files changed:** `src/gdr/commands/research.py`,
+`src/gdr/commands/follow_up.py`, `src/gdr/commands/plan.py`,
+`src/gdr/core/rendering.py`, `src/gdr/core/streaming.py`,
+`tests/unit/test_research_command.py`, `tests/unit/test_rendering.py`,
+`tests/unit/test_streaming.py`, `.github/workflows/{ci,release}.yml`,
+`CHANGELOG.md`, `README.md`, `docs/{MCP,USAGE,TROUBLESHOOTING}.md`,
+`docs/CODE_REVIEW_v0.1.4.md`, `progress.txt`, `uv.lock`.
+
+**Still open from Section B (deliberately, not forgotten):** the
+`RunSpec` refactor of `execute_research` (now 19 keyword params) and
+`JsonlStore`'s unbounded growth. Both are design debt with no
+user-visible symptom; the refactor in particular is a wide, purely
+mechanical diff that deserves its own branch rather than riding along
+with behavior changes.
+
+- **Learnings for future iterations:**
+  - Upgrading a GitHub Action across several majors: read every major's
+    release body (`gh api repos/<r>/releases --jq '.[] | select(.tag_name
+    =="vN.0.0") | .body'`) and check each breaking change against how the
+    workflow actually uses the action. Here 6 majors of `setup-uv`
+    mattered exactly once - v9 flipped `prune-cache` to false (bigger CI
+    caches, accepted) - and checkout v7's fork-PR block only applies to
+    `pull_request_target`/`workflow_run`, which this repo does not use.
+  - Evidence that the release job's cache save works (needed before
+    trusting setup-uv v4's "fail when there is nothing to cache") came
+    from the prior run's own annotations, not from reasoning about what
+    `uv build` downloads.
+  - When a dry-run/preview gains redaction, assert the *absence* of the
+    secret in the output, not just the presence of `[REDACTED]` - the
+    two can both be true if only one of several sites was covered.
+  - Writing the "nothing to redact -> no notice" test first is what kept
+    the announcement line from firing on every plain dry run.

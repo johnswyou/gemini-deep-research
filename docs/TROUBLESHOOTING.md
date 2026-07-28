@@ -319,7 +319,9 @@ Most commands accept a `--config PATH` flag so you can point `gdr` at
 a non-default file and A/B test. If something looks wrong, try the
 `--dry-run` flag on `gdr research` / `gdr follow-up` — it prints the
 full request JSON without calling the API, which is usually enough to
-spot a flag that got dropped.
+spot a flag that got dropped. MCP auth headers come out as
+`[REDACTED]` so the output is safe to paste into a bug report; add
+`--reveal` if you specifically need to check a token.
 
 If you're still stuck, `gdr --version` and `gdr doctor` output are
 what you'll want to include in a bug report.

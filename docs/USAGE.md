@@ -46,7 +46,8 @@ record.
 | `--file-search-store NAME` | Enable File Search on a named store. Bare names are auto-prefixed with `fileSearchStores/`. |
 | `--visualization auto\|off` | Control chart/infographic generation. |
 | `--untrusted-input` | Treat inputs as untrusted. Strips `code_execution` and `mcp_server` tools. |
-| `--dry-run` | Print the request body as JSON and exit without calling the API. |
+| `--dry-run` | Print the request body as JSON and exit without calling the API. Secrets are masked. |
+| `--reveal` | With `--dry-run`, print MCP auth headers in the clear instead of `[REDACTED]`. |
 | `--api-key KEY` | Override `GEMINI_API_KEY` for this run only. |
 | `--no-confirm` | Skip the Max cost-confirmation prompt. |
 | `--config PATH` | Use an alternate config TOML. |
@@ -156,7 +157,8 @@ approval step.
 | `--max` | Execute with Deep Research Max (match how the plan was created). |
 | `--stream / --no-stream` | Toggle live streaming. |
 | `-o / --output DIR` | Exact output directory. |
-| `--dry-run` | Print the request body without calling the API. |
+| `--dry-run` | Print the request body without calling the API. Secrets are masked. |
+| `--reveal` | With `--dry-run`, print MCP auth headers in the clear. |
 | `--api-key KEY` | Override the API key. |
 | `--config PATH` | Alternate config TOML. |
 
@@ -271,7 +273,7 @@ record, the lot.
 
 A subset of the `gdr research` flags: `--max`, `--model`,
 `--stream/--no-stream`, `-o/--output`, `--untrusted-input`,
-`--dry-run`, `--api-key`, `--no-confirm`, and `--config`. Tool and
+`--dry-run`, `--reveal`, `--api-key`, `--no-confirm`, and `--config`. Tool and
 input flags (`--tool`, `--mcp`, `--file`, `--url`,
 `--file-search-store`, `--visualization`) are not available on
 follow-ups — the parent interaction's context carries over instead.
@@ -445,11 +447,16 @@ Each `gdr research` run writes a timestamped directory under
 ├── report.md          # Final synthesized text with citations
 ├── sources.json       # Deduplicated citation list
 ├── metadata.json      # Interaction id, timings, tools, usage
-├── transcript.json    # Raw outputs with MCP/auth redaction applied
+├── transcript.json    # Raw outputs, redacted, without inline base64
 └── images/
     ├── image_001.png  # Charts/infographics (if any)
     └── image_002.png
 ```
+
+`transcript.json` is the full step timeline with secrets redacted.
+Inline base64 payloads (images, attached documents, audio, video) are
+replaced with `[inline data omitted: N base64 chars]` — the decoded
+images live in `images/`, so the bytes are stored once, not twice.
 
 The slug is derived from the query: lowercased, non-alphanumerics
 collapsed to dashes, capped at 64 chars, suffixed with the first 6

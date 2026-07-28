@@ -242,6 +242,91 @@ class TestMetadataAndTranscript:
         assert header_entry["Accept"] == "*/*"
 
 
+class TestTranscriptInlineData:
+    """Inline base64 must not be duplicated into `transcript.json`.
+
+    Images are already decoded to `images/` by the same writer, so
+    carrying the base64 here doubles the artifact size for nothing —
+    megabytes on a visualization-heavy Max run.
+    """
+
+    @staticmethod
+    def _steps_interaction() -> dict[str, Any]:
+        return {
+            "id": "int-img-1",
+            "status": "completed",
+            "steps": [
+                {
+                    "type": "user_input",
+                    "content": [
+                        {"type": "document", "data": "Zm9vYmFy", "mime_type": "application/pdf"},
+                        {"type": "text", "text": "Summarize this."},
+                    ],
+                },
+                {
+                    "type": "model_output",
+                    "content": [
+                        {"type": "text", "text": "Here is a chart."},
+                        {"type": "image", "data": _TINY_PNG_B64, "mime_type": "image/png"},
+                    ],
+                },
+            ],
+        }
+
+    def test_image_payload_is_replaced_by_a_size_marker(self, tmp_path: Path) -> None:
+        transcript = build_transcript(
+            self._steps_interaction(), policy=SecurityPolicy(output_root=tmp_path)
+        )
+        image = transcript["outputs"][1]["content"][1]
+        assert _TINY_PNG_B64 not in json.dumps(transcript)
+        assert image["data"] == f"[inline data omitted: {len(_TINY_PNG_B64)} base64 chars]"
+        # The metadata that makes the transcript useful is kept.
+        assert image["type"] == "image"
+        assert image["mime_type"] == "image/png"
+
+    def test_uploaded_document_payload_is_stripped_too(self, tmp_path: Path) -> None:
+        transcript = build_transcript(
+            self._steps_interaction(), policy=SecurityPolicy(output_root=tmp_path)
+        )
+        document = transcript["outputs"][0]["content"][0]
+        assert document["data"].startswith("[inline data omitted:")
+        assert document["mime_type"] == "application/pdf"
+
+    def test_text_and_uri_content_is_untouched(self, tmp_path: Path) -> None:
+        interaction = {
+            "id": "int-img-2",
+            "status": "completed",
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [
+                        {"type": "text", "text": "Body."},
+                        {"type": "image", "uri": "https://example.com/a.png", "data": None},
+                    ],
+                }
+            ],
+        }
+        transcript = build_transcript(interaction, policy=SecurityPolicy(output_root=tmp_path))
+        content = transcript["outputs"][0]["content"]
+        assert content[0] == {"type": "text", "text": "Body."}
+        assert content[1] == {"type": "image", "uri": "https://example.com/a.png", "data": None}
+
+    def test_artifact_on_disk_carries_no_base64(self, tmp_path: Path) -> None:
+        # End-to-end: the file that lands in the run directory, not just
+        # the dict. `images/` is where the bytes belong.
+        output_dir = tmp_path / "run"
+        paths = write_artifacts(
+            self._steps_interaction(),
+            ctx=_ctx(output_dir),
+            output_dir=output_dir,
+            policy=SecurityPolicy(output_root=tmp_path),
+            started_at=datetime(2026, 4, 22, 14, 30, tzinfo=_UTC),
+            finished_at=datetime(2026, 4, 22, 14, 35, tzinfo=_UTC),
+        )
+        assert _TINY_PNG_B64 not in paths["transcript"].read_text(encoding="utf-8")
+        assert (output_dir / "images" / "image_001.png").read_bytes() == _TINY_PNG_BYTES
+
+
 # ---------------------------------------------------------------------------
 # write_artifacts (end-to-end)
 # ---------------------------------------------------------------------------

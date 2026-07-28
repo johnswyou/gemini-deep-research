@@ -6,13 +6,15 @@ Artifact layout written by ``render_artifacts``::
     ├── report.md       # Final synthesized text + Images + Sources
     ├── sources.json    # Deduplicated citation list
     ├── metadata.json   # Interaction id, timings, tools, usage
-    ├── transcript.json # Raw outputs with MCP/auth redaction applied
+    ├── transcript.json # Raw outputs, redacted, without inline base64
     └── images/
         ├── image_001.png
         └── image_002.jpg
 
 Image outputs are base64-decoded and written under ``images/`` with a
 predictable name. The final report links them as Markdown image refs.
+``transcript.json`` therefore carries only a size marker where inline
+payloads were, so the bytes are written once rather than twice.
 
 Response-shape tolerance (SDK objects vs dicts vs ``steps[].content[]``)
 lives in :mod:`gdr.core.normalize` — this module renders the normalized
@@ -46,6 +48,10 @@ _UTC = timezone.utc
 # Fallback extension when the MIME type is missing or unknown — matches the
 # default the Files API uses.
 _DEFAULT_IMAGE_EXT = ".png"
+
+# Content types whose `data` field is an inline base64 payload. Mirrors the
+# SDK's Content union — text is the only member without one.
+_INLINE_DATA_TYPES: frozenset[str] = frozenset({"image", "audio", "document", "video"})
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +339,33 @@ def build_metadata(
 # ---------------------------------------------------------------------------
 
 
+def _strip_inline_data(node: Any) -> Any:
+    """Replace inline base64 payloads with a size marker, recursively.
+
+    Only content items that actually carry inline bytes are touched, and
+    only their ``data`` field — ``type``, ``mime_type``, and ``uri`` stay,
+    so the transcript still records that an image (and which one) was
+    there. Non-empty strings only: a ``data: null`` on a URI-delivered
+    image is left exactly as the API sent it.
+    """
+    if isinstance(node, dict):
+        stripped: dict[Any, Any] = {}
+        for key, value in node.items():
+            if key == "data" and isinstance(value, str) and value and _has_inline_data(node):
+                stripped[key] = f"[inline data omitted: {len(value)} base64 chars]"
+            else:
+                stripped[key] = _strip_inline_data(value)
+        return stripped
+    if isinstance(node, list):
+        return [_strip_inline_data(item) for item in node]
+    return node
+
+
+def _has_inline_data(node: dict[Any, Any]) -> bool:
+    node_type = node.get("type")
+    return isinstance(node_type, str) and node_type in _INLINE_DATA_TYPES
+
+
 def build_transcript(interaction: Any, *, policy: SecurityPolicy) -> dict[str, Any]:
     """Raw timeline + minimal envelope, with sensitive fields redacted.
 
@@ -340,6 +373,11 @@ def build_transcript(interaction: Any, *, policy: SecurityPolicy) -> dict[str, A
     the full ``steps`` timeline is emitted (user input, thoughts, tool
     call/result steps, and model output) so reconstruction is trivial;
     legacy ``outputs`` payloads fall back to their content items.
+
+    Inline base64 payloads are replaced with a size marker: images are
+    already decoded into ``images/`` by the same writer, and attached
+    documents came from the user's own disk, so keeping the bytes here
+    only doubles the artifact size.
     """
     outputs = _get(interaction, "steps") or raw_output_items(interaction)
     serialized: list[Any] = []
@@ -355,7 +393,7 @@ def build_transcript(interaction: Any, *, policy: SecurityPolicy) -> dict[str, A
     raw: dict[str, Any] = {
         "interaction_id": _get(interaction, "id"),
         "status": _get(interaction, "status"),
-        "outputs": serialized,
+        "outputs": _strip_inline_data(serialized),
     }
     return cast("dict[str, Any]", policy.redact(raw))
 

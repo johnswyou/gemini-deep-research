@@ -80,6 +80,11 @@ def run(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the request JSON and exit without calling the API."
     ),
+    reveal: bool = typer.Option(
+        False,
+        "--reveal",
+        help="With --dry-run, print MCP auth headers in the clear instead of [REDACTED].",
+    ),
     api_key: str | None = typer.Option(
         None, "--api-key", help="Override the API key for this run only."
     ),
@@ -128,6 +133,7 @@ def run(
             api_input=question,
             untrusted_input=effective_untrusted,
             model=model,
+            reveal=reveal,
         )
     except NetworkError as exc:
         # The Gemini API has been rejecting agent follow-ups on completed

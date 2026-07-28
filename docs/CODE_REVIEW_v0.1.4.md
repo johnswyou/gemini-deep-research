@@ -1,14 +1,20 @@
 # Deep Code Review — `gdr` v0.1.4
 
-> **Remediation status (2026-07-28):** findings **A1–A4 are fixed** in the
-> commits following this review (see `CHANGELOG.md` → Unreleased), each
-> verified against the real SDK: the MCP request now serializes intact
-> with no `UNKNOWN` downgrade, a real `AuthenticationError(401)` exits 4
-> with the key hint, and `gdr follow-up --max` prompts (declining creates
-> nothing). Auth classification was extended beyond the filed site to
-> `status`/`resume`/`cancel`/planning and the poll loop. **Section B is
-> still open** — dry-run redaction, transcript image bloat, and the
-> smaller hardening notes.
+> **Remediation status (2026-07-28):** findings **A1–A4 are fixed** and
+> shipped in **v0.2.0**, each verified against the real SDK: the MCP
+> request now serializes intact with no `UNKNOWN` downgrade, a real
+> `AuthenticationError(401)` exits 4 with the key hint, and
+> `gdr follow-up --max` prompts (declining creates nothing). Auth
+> classification was extended beyond the filed site to
+> `status`/`resume`/`cancel`/planning and the poll loop.
+>
+> **Section B** was worked in a follow-up pass (see `CHANGELOG.md` →
+> Unreleased): dry-run redaction behind `--reveal`, transcript
+> inline-data stripping, the step-scoped stream buffer, and the
+> `_handle_start` guard are all fixed. Two bullets are deliberately
+> **still open** — the `RunSpec` refactor of `execute_research` and
+> `JsonlStore`'s unbounded growth. Both are design debt with no
+> user-visible symptom.
 
 **Date:** 2026-07-28 · **Tree reviewed:** `570250c` (v0.1.4, clean working tree) · **Scope:** full repo — request assembly, response adapter, streaming, commands, security, tests, docs, packaging, CI.
 

@@ -27,6 +27,10 @@ Delta types observed for Deep Research:
 | `thought_summary`  | ``delta.content.text`` — one intermediate reasoning step  |
 | `image`            | ``delta.data`` — base64-encoded image bytes               |
 
+A `text` delta only counts as report body when its index belongs to a
+``model_output`` step (see :meth:`StreamAggregator._is_body_index`) —
+the streaming twin of ``normalize._BODY_STEP_TYPES``.
+
 ## What this module does
 
 The aggregator reduces raw events into a stream of semantic
@@ -218,6 +222,10 @@ class StreamAggregator:
         on_event: Callable[[StreamEvent], None] | None = None,
     ) -> None:
         self._builders: dict[int, _Builder] = {}
+        # Content type per step/content index, used to decide which indexes
+        # may contribute to the report body. Kept after ``step.stop`` so a
+        # late delta is still judged by the step that opened the index.
+        self._content_type_by_index: dict[int, str | None] = {}
         self._text_chunks: list[str] = []
         self._annotations: list[Any] = []
         self._thoughts: list[str] = []
@@ -299,8 +307,16 @@ class StreamAggregator:
 
     def _handle_start(self, event: Any) -> None:
         interaction = _get(event, "interaction")
-        self._interaction_id = _get(interaction, "id")
-        self._status = _get(interaction, "status")
+        # Assign defensively, like _handle_status_update: a second
+        # `interaction.created` — a replay after a reconnect, or a raw
+        # dict event with no id — must not overwrite or clear the id the
+        # caller needs for `gdr resume`.
+        interaction_id = _get(interaction, "id")
+        if interaction_id and self._interaction_id is None:
+            self._interaction_id = str(interaction_id)
+        status = _get(interaction, "status")
+        if status:
+            self._status = str(status)
         self._on_event(
             StreamEvent(kind="start", interaction_id=self._interaction_id, status=self._status)
         )
@@ -325,10 +341,28 @@ class StreamAggregator:
             mime = _get(_get(event, "content"), "mime_type")
             if mime:
                 self._image_mime_by_index[int(index)] = str(mime)
+        self._content_type_by_index[int(index)] = content_type
         self._builders[int(index)] = _make_builder(int(index), content_type)
         self._on_event(
             StreamEvent(kind="content_start", index=int(index), content_type=content_type)
         )
+
+    def _is_body_index(self, index: int) -> bool:
+        """Whether text arriving at ``index`` belongs in the report body.
+
+        Only ``model_output`` steps carry report text — the same rule the
+        fetch path applies via ``normalize._BODY_STEP_TYPES``. Tool-call
+        and user-input steps are timeline context; splicing their text
+        into the report would be that leak one layer down.
+        :func:`_content_type_from_start_event` already collapses
+        ``model_output`` (and a legacy ``text`` content block) to
+        ``"text"``, so that is the whole allowlist.
+
+        An index we never saw a start event for counts as body: dropping
+        real report text is the worse failure of the two.
+        """
+        content_type = self._content_type_by_index.get(index)
+        return content_type is None or content_type == "text"
 
     def _handle_content_delta(self, event: Any) -> None:
         index = _get(event, "index")
@@ -343,12 +377,13 @@ class StreamAggregator:
         if builder is None:
             builder = _make_builder(int(index), _infer_content_type(delta_type))
             self._builders[int(index)] = builder
+            self._content_type_by_index.setdefault(int(index), _infer_content_type(delta_type))
 
         if delta_type == "text":
             chunk = _get(delta, "text", "") or ""
             if isinstance(builder, _TextBuilder):
                 builder.add(delta)
-            if chunk:
+            if chunk and self._is_body_index(int(index)):
                 self._text_chunks.append(chunk)
                 self._on_event(StreamEvent(kind="text_delta", index=int(index), text=chunk))
         elif delta_type in ("thought", "thought_summary"):
