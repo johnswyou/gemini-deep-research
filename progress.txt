@@ -2306,3 +2306,58 @@ Section B of docs/CODE_REVIEW_v0.1.4.md is now fully remediated.
     inheriting the parent's untrusted posture). Build the spec BEFORE
     the I/O that might adjust it, so an impossible flag combination
     fails before anything is opened or printed.
+
+---
+
+## 2026-07-28 (night) - v0.3.0 released
+
+Merged PR #5 (section B hardening, 6 commits) and PR #6 (RunSpec +
+store compaction, 3 commits) into main as merge commits `36b6d03` and
+`3a1c1bc`, then cut v0.3.0.
+
+**Doc audit before the release** (`1d1af93`). Done mechanically, not by
+skimming: a script ran each command's real `--help` through a regex and
+diffed the flag set against USAGE.md in both directions (every shipped
+flag documented; nothing documented that isn't shipped, apart from
+`--help`). Also checked `Config.model_fields` against the config
+reference table, `errors.py` exit codes against both exit-code tables,
+doctor's seven `_check_*` functions against its documented list, and
+every `tests/...::Symbol` pointer in the docs against the tree. All
+accurate. Two genuine gaps found, both left over from the v0.2.0 auth
+work: nothing documented a *rejected* key (only a missing one), and
+both exit-code tables described polling's five-retry backoff without
+the exception that a rejected key fails fast. Plus the MCP example
+still told readers to use `--dry-run` to check a header value.
+
+**Release** (`4cd0c9a`, tag `v0.3.0`). Minor not patch: `transcript.json`
+and `interactions.jsonl` both change shape. Bumped pyproject,
+`__init__.py`, AND `uv.lock` - the v0.2.0 lesson, applied.
+
+Verified after the fact rather than trusting green checks: CI 8/8 on
+the release commit, release run 30394956029 green through version
+guard / build / GitHub Release / Publish, both assets on the release,
+PyPI JSON reporting 0.3.0, and a clean-room
+`uvx --from gemini-deep-research==0.3.0` running `--dry-run` against a
+config with a secret - masked by default, revealed with `--reveal`.
+The Node 20 deprecation annotation is gone from every job.
+
+- **Learnings for future iterations:**
+  - The docs-vs-`--help` diff is worth keeping as a habit before any
+    release; it is ~20 lines of throwaway script and it proves the flag
+    tables in a way reading cannot. Run it in both directions - the
+    "documented but not shipped" direction is where staleness hides.
+  - A doc audit finds gaps in what was NOT written, not just errors in
+    what was. Both real findings here were missing sections, and both
+    described behavior shipped one release earlier - the CHANGELOG had
+    them, the reference docs never caught up. When a release changes
+    behavior, grep the reference docs for the OLD behavior's
+    description, not just for the feature name.
+  - Do not `case "$out" in *0.3.0*)` when checking a version: the uv
+    "no solution found" error quotes the requested version back at you,
+    so the guard passes on failure. Match the exact expected output
+    (`"gdr 0.3.0"`).
+  - PyPI's JSON API updates before the simple index that uv resolves
+    against; a 0.3.0 in the JSON does not mean `uvx --from pkg==0.3.0`
+    resolves yet. Poll with `--refresh`.
+  - `gh release view --json a,b --jq` cannot take two `;`-separated
+    filters; run it twice.
