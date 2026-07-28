@@ -20,7 +20,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from gdr.commands._common import build_client, friendly_errors, stdout_is_tty
+from gdr.commands._common import build_client, friendly_errors, open_store, stdout_is_tty
 from gdr.config import Config, load_config
 from gdr.constants import (
     AGENT_MAX,
@@ -51,7 +51,7 @@ from gdr.core.models import (
     Visualization,
 )
 from gdr.core.normalize import error_of, get_field, has_report_content, interaction_status
-from gdr.core.persistence import JsonlStore, Store
+from gdr.core.persistence import Store
 from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
 from gdr.core.requests import build_create_kwargs
@@ -77,6 +77,88 @@ class _CreateOutcome:
     fallback_outputs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     interrupted: bool = False
     fallback_total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    """Everything :func:`execute_research` needs to know about a run.
+
+    Three commands build one of these — ``gdr research`` (with or
+    without ``--plan``), ``gdr plan approve``, and ``gdr follow-up`` —
+    and the differences between them are exactly the fields they set.
+    That is the point: when a run's behavior depends on something, it is
+    a named field here rather than a condition inferred from an
+    unrelated one. (The Max cost gate used to read
+    ``previous_interaction_id`` as "the user already consented", which
+    silently exempted every follow-up; ``max_already_confirmed`` is what
+    replaced it.)
+
+    Frozen, so a spec can be built once at the command boundary and
+    passed down without anyone wondering who mutated it.
+
+    ``console`` and the record store are *not* in here — they are I/O
+    ports, passed to :func:`execute_research` separately.
+    """
+
+    # -- what to research ----------------------------------------------
+    config: Config
+    display_query: str
+    """Human-facing label: the output directory slug and the metadata."""
+    api_input: str | None = None
+    """Replaces ``display_query`` on the wire (e.g. "Plan looks good!")."""
+    previous_interaction_id: str | None = None
+    """Chains off a prior interaction. NOT a statement about consent."""
+    model: str | None = None
+    """A plain Gemini model instead of a Deep Research agent."""
+    use_max: bool = False
+
+    # -- request shape -------------------------------------------------
+    builtin_tools: tuple[str, ...] | None = None
+    """None means "fall back to the configured defaults"."""
+    mcp_servers: tuple[McpSpec, ...] = ()
+    file_search: FileSearchSpec | None = None
+    input_parts: tuple[InputPart, ...] = ()
+    visualization: Visualization | None = None
+    untrusted_input: bool = False
+
+    # -- how to run it -------------------------------------------------
+    use_stream: bool = False
+    output: Path | None = None
+    api_key: str | None = None
+
+    # -- consent and previewing ----------------------------------------
+    no_confirm: bool = False
+    max_already_confirmed: bool = False
+    """The caller already put the user through the Max cost gate for
+    this invocation (the ``--plan`` flow confirms before the plan
+    interaction, which is itself billed at Max rates). Suppresses a
+    second prompt — nothing else does."""
+    dry_run: bool = False
+    plan_mode_for_dry_run: bool = False
+    """Set by ``run`` for ``--plan --dry-run``: preview the *plan*
+    request rather than the execution request, since that is what would
+    actually be sent first."""
+    reveal: bool = False
+    """Print ``--dry-run`` secrets in the clear. No effect on a real run."""
+
+    def __post_init__(self) -> None:
+        if self.model is not None and self.use_max:
+            raise ConfigError(
+                "--model and --max are mutually exclusive: --model targets a plain "
+                "Gemini model, --max a Deep Research agent."
+            )
+
+    @property
+    def policy(self) -> SecurityPolicy:
+        """The run's security posture — derived, never passed in.
+
+        Threading a policy alongside the spec would let the two disagree;
+        there is exactly one policy a given spec can mean.
+        """
+        return SecurityPolicy(
+            output_root=self.config.output_dir,
+            untrusted=self.untrusted_input,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -116,44 +198,49 @@ def _resolve_agent(config: Config, *, use_max: bool) -> str:
     return AGENT_MAX if use_max else config.default_agent
 
 
-def _build_run_context(
-    *,
-    query: str,
-    config: Config,
-    use_max: bool,
-    output_dir: Path,
-    stream: bool,
-    previous_interaction_id: str | None = None,
-    builtin_tools: tuple[str, ...] | None = None,
-    mcp_servers: tuple[McpSpec, ...] = (),
-    file_search: FileSearchSpec | None = None,
-    input_parts: tuple[InputPart, ...] = (),
-    visualization: Visualization | None = None,
-    untrusted_input: bool = False,
-    model: str | None = None,
-) -> RunContext:
+def _build_run_context(spec: RunSpec, *, output_dir: Path) -> RunContext:
+    """Resolve a :class:`RunSpec` against config into the request context.
+
+    This is where "unset" becomes "configured default": tools, agent,
+    and visualization. Raises ConfigError on a bad ``[mcp_servers.*]``
+    entry, which the caller turns into exit 4.
+    """
+    config = spec.config
+    builtin_tools = spec.builtin_tools
+    mcp_servers = spec.mcp_servers
+    if spec.model is None:
+        mcp_servers = _merge_config_mcps(config, mcp_servers)
+    elif builtin_tools is None:
+        # Plain-model follow-ups are lightweight Q&A over existing
+        # context: no research tools unless explicitly requested.
+        builtin_tools = ()
+
     tools = config.default_tools if builtin_tools is None else builtin_tools
-    effective_visualization = visualization if visualization is not None else config.visualization
+    effective_visualization = (
+        spec.visualization if spec.visualization is not None else config.visualization
+    )
     return RunContext(
-        query=query,
-        agent=model if model is not None else _resolve_agent(config, use_max=use_max),
-        model=model,
+        query=spec.display_query,
+        agent=spec.model
+        if spec.model is not None
+        else _resolve_agent(config, use_max=spec.use_max),
+        model=spec.model,
         builtin_tools=tools,
         mcp_servers=mcp_servers,
-        file_search=file_search,
-        input_parts=input_parts,
+        file_search=spec.file_search,
+        input_parts=spec.input_parts,
         output_dir=output_dir,
-        stream=stream,
+        stream=spec.use_stream,
         background=True,
         agent_config=AgentConfig(
             thinking_summaries=config.thinking_summaries,
             visualization=effective_visualization,
             collaborative_planning=False,
         ),
-        previous_interaction_id=previous_interaction_id,
+        previous_interaction_id=spec.previous_interaction_id,
         confirm_max=config.confirm_max,
         auto_open=config.auto_open,
-        untrusted_input=untrusted_input,
+        untrusted_input=spec.untrusted_input,
     )
 
 
@@ -388,26 +475,28 @@ def run(
         console.print(f"[green]Plan approved.[/green]  id=[dim]{plan_id}[/dim]")
 
     execute_research(
-        config=config,
-        display_query=query,
-        use_max=use_max,
-        use_stream=use_stream,
-        output=output,
-        api_key=api_key,
-        no_confirm=no_confirm,
+        RunSpec(
+            config=config,
+            display_query=query,
+            api_input=approve_input,
+            previous_interaction_id=previous_interaction_id,
+            use_max=use_max,
+            builtin_tools=tools_override,
+            mcp_servers=mcp_specs,
+            file_search=file_search_spec,
+            input_parts=extra_parts,
+            visualization=vis_literal,
+            untrusted_input=effective_untrusted,
+            use_stream=use_stream,
+            output=output,
+            api_key=api_key,
+            no_confirm=no_confirm,
+            max_already_confirmed=max_already_confirmed,
+            dry_run=dry_run,
+            plan_mode_for_dry_run=use_plan,
+            reveal=reveal,
+        ),
         console=console,
-        dry_run=dry_run,
-        previous_interaction_id=previous_interaction_id,
-        api_input=approve_input,
-        plan_mode_for_dry_run=use_plan,
-        builtin_tools=tools_override,
-        mcp_servers=mcp_specs,
-        file_search=file_search_spec,
-        input_parts=extra_parts,
-        visualization=vis_literal,
-        untrusted_input=effective_untrusted,
-        max_already_confirmed=max_already_confirmed,
-        reveal=reveal,
     )
 
 
@@ -416,93 +505,27 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def execute_research(
-    *,
-    config: Config,
-    display_query: str,
-    use_max: bool,
-    use_stream: bool,
-    output: Path | None,
-    api_key: str | None,
-    no_confirm: bool,
-    console: Console,
-    dry_run: bool = False,
-    previous_interaction_id: str | None = None,
-    api_input: str | None = None,
-    plan_mode_for_dry_run: bool = False,
-    builtin_tools: tuple[str, ...] | None = None,
-    mcp_servers: tuple[McpSpec, ...] = (),
-    file_search: FileSearchSpec | None = None,
-    input_parts: tuple[InputPart, ...] = (),
-    visualization: Visualization | None = None,
-    untrusted_input: bool = False,
-    model: str | None = None,
-    max_already_confirmed: bool = False,
-    reveal: bool = False,
-) -> None:
+def execute_research(spec: RunSpec, *, console: Console, store: Store | None = None) -> None:
     """Run the full submit → stream/poll → render pipeline.
 
     Shared between ``gdr research`` (with or without ``--plan``),
-    ``gdr plan approve``, and ``gdr follow-up``. When
-    ``previous_interaction_id`` is set, the created interaction inherits
-    the parent context and ``api_input`` (e.g. ``"Plan looks good!"``)
-    replaces the display query on the wire.
+    ``gdr plan approve``, and ``gdr follow-up`` — see :class:`RunSpec`
+    for what varies between them.
 
-    ``model`` switches the run to a plain Gemini model instead of a Deep
-    Research agent (lightweight follow-ups): ``model=`` on the wire, no
-    ``agent_config``, no builtin/config tools, no Max confirmation.
-
-    ``plan_mode_for_dry_run`` is set by ``run`` when ``--plan --dry-run``
-    is combined; it makes the printed kwargs describe the *plan* phase
-    rather than the execution phase, so users see what the planning call
-    would look like.
-
-    ``max_already_confirmed`` says the caller has already put the user
-    through the Max cost gate for this invocation (the ``--plan`` flow
-    confirms before the plan interaction, which is itself billed at Max
-    rates). It suppresses a second prompt — nothing else does.
-
-    ``reveal`` prints ``--dry-run`` secrets in the clear instead of
-    ``[REDACTED]``; it has no effect on a real run.
+    ``store`` is the record store to append to; when omitted, one is
+    opened once per run (after the dry-run and confirmation gates, so
+    neither touches disk). Callers that already hold one should pass it
+    rather than paying for a second full load.
     """
-    policy = SecurityPolicy(
-        output_root=config.output_dir,
-        untrusted=untrusted_input,
-    )
+    config = spec.config
 
     # For --dry-run we don't need network or API key. The synthetic
     # output_dir needs to pass validation but doesn't need to exist.
-    dry_output = output if output is not None else config.output_dir / "(dry-run)"
+    dry_output = spec.output if spec.output is not None else config.output_dir / "(dry-run)"
 
     try:
-        if model is None:
-            mcp_servers = _merge_config_mcps(config, mcp_servers)
-        elif builtin_tools is None:
-            # Plain-model follow-ups are lightweight Q&A over existing
-            # context: no research tools unless explicitly requested.
-            builtin_tools = ()
-        ctx_for_kwargs = _build_run_context(
-            query=display_query,
-            config=config,
-            use_max=use_max,
-            output_dir=dry_output,
-            stream=use_stream,
-            previous_interaction_id=previous_interaction_id,
-            builtin_tools=builtin_tools,
-            mcp_servers=mcp_servers,
-            file_search=file_search,
-            input_parts=input_parts,
-            visualization=visualization,
-            untrusted_input=untrusted_input,
-            model=model,
-        )
-        kwargs, stripped = _build_request_kwargs(
-            ctx_for_kwargs,
-            policy,
-            api_input=api_input,
-            plan_mode_for_dry_run=plan_mode_for_dry_run,
-            dry_run=dry_run,
-        )
+        ctx_for_kwargs = _build_run_context(spec, output_dir=dry_output)
+        kwargs, stripped = _build_request_kwargs(spec, ctx_for_kwargs)
     except ConfigError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=exc.exit_code) from exc
@@ -514,11 +537,11 @@ def execute_research(
 
     # Untrusted mode strips mcp_server from the request, so there are no
     # credentials in flight to warn about.
-    if not policy.untrusted:
+    if not spec.untrusted_input:
         _warn_plaintext_mcp(console, ctx_for_kwargs.mcp_servers)
 
-    if dry_run:
-        _print_dry_run(console, kwargs, reveal=reveal)
+    if spec.dry_run:
+        _print_dry_run(console, kwargs, reveal=spec.reveal)
         return
 
     # Max confirmation gate — skip when the user has opted out either
@@ -526,44 +549,44 @@ def execute_research(
     # they already cleared the gate earlier in this invocation
     # (``max_already_confirmed``, set by the --plan flow).
     #
-    # Consent is passed in explicitly and never inferred from
-    # ``previous_interaction_id``: that field only means "this run chains
-    # off another interaction", which is also true of every follow-up —
-    # and a `gdr follow-up --max` is a brand-new paid Max run the user has
-    # not agreed to yet.
+    # Consent is a field on the spec and is never inferred from
+    # ``previous_interaction_id``: that only means "this run chains off
+    # another interaction", which is also true of every follow-up — and a
+    # `gdr follow-up --max` is a brand-new paid Max run the user has not
+    # agreed to yet.
     if (
-        use_max
+        spec.use_max
         and ctx_for_kwargs.confirm_max
-        and not no_confirm
-        and not max_already_confirmed
+        and not spec.no_confirm
+        and not spec.max_already_confirmed
         and not _confirm_max(console)
     ):
         console.print("[yellow]Aborted.[/yellow]")
         raise typer.Exit(code=0)
 
-    client = build_client(console, api_key=api_key, config=config)
+    client = build_client(console, api_key=spec.api_key, config=config)
+    # One store for the whole run: it is appended to twice (in_progress,
+    # then terminal), and opening it re-reads the entire history.
+    active_store = store if store is not None else open_store()
 
     started_at = datetime.now(_UTC)
     create_outcome, interaction_id, recorded_dirs = _submit_interaction(
+        spec,
         client=client,
         kwargs=kwargs,
-        use_stream=use_stream,
         console=console,
-        display_query=display_query,
-        config=config,
-        output=output,
-        policy=policy,
         ctx_for_kwargs=ctx_for_kwargs,
         started_at=started_at,
+        store=active_store,
     )
 
     final_output_dir = recorded_dirs.get(interaction_id) or _allocate_output_dir(
         root=config.output_dir,
-        query=display_query,
+        query=spec.display_query,
         interaction_id=interaction_id,
         started_at=started_at,
-        override=output,
-        policy=policy,
+        override=spec.output,
+        policy=spec.policy,
     )
 
     ctx = ctx_for_kwargs.model_copy(update={"output_dir": final_output_dir})
@@ -574,6 +597,7 @@ def execute_research(
             ctx=ctx,
             started_at=started_at,
             finished_at=None,
+            store=active_store,
         )
 
     if create_outcome.interrupted:
@@ -584,14 +608,13 @@ def execute_research(
 
     try:
         _finalize_and_render(
+            spec,
             client=client,
             ctx=ctx,
             interaction_id=interaction_id,
-            final_output_dir=final_output_dir,
-            policy=policy,
             started_at=started_at,
             console=console,
-            query=display_query,
+            store=active_store,
             fallback_outputs=create_outcome.fallback_outputs,
             fallback_total_tokens=create_outcome.fallback_total_tokens,
         )
@@ -601,17 +624,14 @@ def execute_research(
 
 
 def _submit_interaction(
+    spec: RunSpec,
     *,
     client: GdrClient,
     kwargs: dict[str, Any],
-    use_stream: bool,
     console: Console,
-    display_query: str,
-    config: Config,
-    output: Path | None,
-    policy: SecurityPolicy,
     ctx_for_kwargs: RunContext,
     started_at: datetime,
+    store: Store,
 ) -> tuple[_CreateOutcome, str, dict[str, Path]]:
     """Create the interaction and consume its stream when streaming.
 
@@ -633,20 +653,18 @@ def _submit_interaction(
         raise NetworkError(f"Failed to start research: {exc}") from exc
 
     record_stream_start, recorded_dirs = _make_stream_start_recorder(
-        config=config,
-        display_query=display_query,
+        spec,
         started_at=started_at,
-        output=output,
-        policy=policy,
         ctx_for_kwargs=ctx_for_kwargs,
+        store=store,
     )
 
     try:
         create_outcome = _consume_create_result(
             create_result,
-            use_stream=use_stream,
+            use_stream=spec.use_stream,
             console=console,
-            query=display_query,
+            query=spec.display_query,
             client=client,
             on_interaction_id=record_stream_start,
         )
@@ -679,13 +697,11 @@ def _submit_interaction(
 
 
 def _make_stream_start_recorder(
+    spec: RunSpec,
     *,
-    config: Config,
-    display_query: str,
     started_at: datetime,
-    output: Path | None,
-    policy: SecurityPolicy,
     ctx_for_kwargs: RunContext,
+    store: Store,
 ) -> tuple[Callable[[str], None], dict[str, Path]]:
     """Build the on-start callback that records a streamed run early.
 
@@ -703,12 +719,12 @@ def _make_stream_start_recorder(
 
     def _record(new_id: str) -> None:
         directory = _allocate_output_dir(
-            root=config.output_dir,
-            query=display_query,
+            root=spec.config.output_dir,
+            query=spec.display_query,
             interaction_id=new_id,
             started_at=started_at,
-            override=output,
-            policy=policy,
+            override=spec.output,
+            policy=spec.policy,
         )
         recorded_dirs[new_id] = directory
         _record_run(
@@ -716,18 +732,15 @@ def _make_stream_start_recorder(
             ctx=ctx_for_kwargs.model_copy(update={"output_dir": directory}),
             started_at=started_at,
             finished_at=None,
+            store=store,
         )
 
     return _record, recorded_dirs
 
 
 def _build_request_kwargs(
+    spec: RunSpec,
     ctx: RunContext,
-    policy: SecurityPolicy,
-    *,
-    api_input: str | None,
-    plan_mode_for_dry_run: bool,
-    dry_run: bool,
 ) -> tuple[dict[str, Any], list[str]]:
     """Build create() kwargs with optional api_input override and plan-mode
     preview for --dry-run.
@@ -736,15 +749,15 @@ def _build_request_kwargs(
     we show what the first *plan* request would look like instead of the
     execution request, since that's what we'd actually send first.
     """
-    if plan_mode_for_dry_run and dry_run:
+    if spec.plan_mode_for_dry_run and spec.dry_run:
         from gdr.core.planning import PlanRequest, build_plan_kwargs  # noqa: PLC0415 — lazy
 
         req = PlanRequest(input_text=ctx.query, agent=ctx.agent, input_parts=ctx.input_parts)
         return build_plan_kwargs(req), []
 
-    kwargs, stripped = build_create_kwargs(ctx, policy)
-    if api_input is not None:
-        kwargs["input"] = api_input
+    kwargs, stripped = build_create_kwargs(ctx, spec.policy)
+    if spec.api_input is not None:
+        kwargs["input"] = spec.api_input
     return kwargs, stripped
 
 
@@ -754,15 +767,14 @@ def _build_request_kwargs(
 
 
 def _finalize_and_render(
+    spec: RunSpec,
     *,
     client: GdrClient,
     ctx: RunContext,
     interaction_id: str,
-    final_output_dir: Path,
-    policy: SecurityPolicy,
     started_at: datetime,
     console: Console,
-    query: str,
+    store: Store,
     fallback_outputs: tuple[dict[str, Any], ...] = (),
     fallback_total_tokens: int | None = None,
 ) -> None:
@@ -780,6 +792,10 @@ def _finalize_and_render(
     3. Write artifacts and the terminal Record for EVERY terminal state —
        a failed run's transcript and metadata are exactly what you want
        for a post-mortem — then exit 0 only if it actually completed.
+
+    Artifacts land in ``ctx.output_dir``: the caller resolved the run's
+    directory before building ``ctx``, so there is no second copy of it
+    to pass in and get out of sync.
     """
     failure: GdrError | None = None
     try:
@@ -801,7 +817,7 @@ def _finalize_and_render(
                 client.interactions.get,
                 interaction_id,
                 console=console,
-                query=query,
+                query=spec.display_query,
             )
         )
     except (ResearchFailedError, ResearchCancelledError) as exc:
@@ -818,8 +834,8 @@ def _finalize_and_render(
     paths = write_artifacts(
         interaction,
         ctx=ctx,
-        output_dir=final_output_dir,
-        policy=policy,
+        output_dir=ctx.output_dir,
+        policy=spec.policy,
         started_at=started_at,
         finished_at=finished_at,
     )
@@ -829,6 +845,7 @@ def _finalize_and_render(
         ctx=ctx,
         started_at=started_at,
         finished_at=finished_at,
+        store=store,
     )
 
     final_status = str(get_field(interaction, "status") or "unknown")
@@ -1056,17 +1073,19 @@ def _record_run(
     ctx: RunContext,
     started_at: datetime,
     finished_at: datetime | None,
-    store: Store | None = None,
+    store: Store,
 ) -> None:
     """Append a Record describing this run to the local store.
 
     Called twice per run: once with status ``in_progress`` as soon as the
     interaction id is known (``finished_at=None``), and once with the
     terminal state. ``JsonlStore`` is last-write-wins per id, so the
-    second append supersedes the first.
+    second append supersedes the first (and its ``open()`` later drops
+    the superseded row).
 
-    The ``store`` parameter is injectable so tests can pass a memory-backed
-    fake. In normal use we open the default JsonlStore just-in-time.
+    The store is passed in rather than opened here: opening re-reads the
+    whole history, and doing that once per append meant paying for it
+    twice on every run.
     """
     interaction_id = get_field(interaction, "id")
     if not interaction_id:
@@ -1093,8 +1112,7 @@ def _record_run(
         untrusted=ctx.untrusted_input,
     )
 
-    target_store = store if store is not None else JsonlStore.open()
-    target_store.append(record)
+    store.append(record)
 
 
 def _print_done(console: Console, paths: dict[str, Path]) -> None:

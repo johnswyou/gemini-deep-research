@@ -8,13 +8,12 @@
 > classification was extended beyond the filed site to
 > `status`/`resume`/`cancel`/planning and the poll loop.
 >
-> **Section B** was worked in a follow-up pass (see `CHANGELOG.md` →
+> **Section B is also fully remediated** (see `CHANGELOG.md` →
 > Unreleased): dry-run redaction behind `--reveal`, transcript
-> inline-data stripping, the step-scoped stream buffer, and the
-> `_handle_start` guard are all fixed. Two bullets are deliberately
-> **still open** — the `RunSpec` refactor of `execute_research` and
-> `JsonlStore`'s unbounded growth. Both are design debt with no
-> user-visible symptom.
+> inline-data stripping, the step-scoped stream buffer, the
+> `_handle_start` guard, `JsonlStore` compaction with a retention cap,
+> and the `RunSpec` refactor that took `execute_research` from 21
+> keyword arguments to 3. Nothing in this review is outstanding.
 
 **Date:** 2026-07-28 · **Tree reviewed:** `570250c` (v0.1.4, clean working tree) · **Scope:** full repo — request assembly, response adapter, streaming, commands, security, tests, docs, packaging, CI.
 
@@ -141,6 +140,8 @@ This catches every future silent-downgrade of a tool, input part, or agent_confi
 ---
 
 ## B. Lower-priority observations
+
+> All six are fixed; the findings are kept verbatim below as the record of what was wrong. See `CHANGELOG.md` → Unreleased for what each became.
 
 * **`--dry-run` prints expanded secrets.** `research.py:996-998` dumps the raw kwargs, so `headers.Authorization = "Bearer env:MCP_TOKEN"` renders as `Bearer super-secret-token-value` in terminal scrollback and CI logs. `docs/MCP.md:164` calls this intentional — but under the heading "No secret exfiltration via `--dry-run`", which asserts the opposite of what the section says. Either rename the heading, or redact by default and add `--reveal` (mirroring the `gdr config get` treatment).
 * **Transcript bloat.** `rendering.py:344-353` dumps whole `steps` with `model_dump(exclude_none=True)`, so image `data` is written base64 into `transcript.json` *and* decoded into `images/`. A visualization-heavy Max run duplicates megabytes.

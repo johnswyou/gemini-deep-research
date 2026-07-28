@@ -24,7 +24,7 @@ import typer
 from rich.console import Console
 
 from gdr.commands._common import build_client, friendly_errors, stdout_is_tty
-from gdr.commands.research import execute_research
+from gdr.commands.research import RunSpec, execute_research
 from gdr.config import load_config
 from gdr.constants import AGENT_MAX
 from gdr.core.client import GdrClient
@@ -169,19 +169,21 @@ def approve_cmd(
     label = display_query or f"approved-plan-{id_fragment(plan_id)}"
 
     execute_research(
-        config=config,
-        display_query=label,
-        use_max=use_max,
-        use_stream=use_stream,
-        output=output,
-        api_key=api_key,
-        no_confirm=False,
+        RunSpec(
+            config=config,
+            display_query=label,
+            api_input="Plan looks good!",
+            previous_interaction_id=plan_id,
+            use_max=use_max,
+            use_stream=use_stream,
+            output=output,
+            api_key=api_key,
+            no_confirm=False,
+            # Approving a plan you have already read IS the cost decision —
+            # say so explicitly rather than borrowing --no-confirm's meaning.
+            max_already_confirmed=True,
+            dry_run=dry_run,
+            reveal=reveal,
+        ),
         console=console,
-        dry_run=dry_run,
-        previous_interaction_id=plan_id,
-        api_input="Plan looks good!",
-        # Approving a plan you have already read IS the cost decision —
-        # say so explicitly rather than borrowing --no-confirm's meaning.
-        max_already_confirmed=True,
-        reveal=reveal,
     )

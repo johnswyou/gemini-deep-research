@@ -225,6 +225,9 @@ The local JsonlStore doesn't have a record for `<id>`. Causes:
   not synced.
 * Prefix collision — `gdr show` auto-tries prefix match if exact
   lookup fails, but if two ids share the prefix, neither wins.
+* The run is older than the store's 5000-record cap, which is applied
+  when the store is opened. The artifacts are still on disk under
+  `output_dir`; only the index entry is gone.
 
 `gdr resume` requires a record to reconstruct the `RunContext`. If
 you genuinely lost the record but the interaction still exists

@@ -18,7 +18,11 @@ import pytest
 from typer.testing import CliRunner
 
 from gdr.cli import app
+from gdr.commands.research import RunSpec
+from gdr.config import load_config
 from gdr.constants import AGENT_MAX
+from gdr.core.persistence import JsonlStore
+from gdr.errors import ConfigError
 
 # 1x1 transparent PNG, for --file round-trip tests.
 _TINY_PNG_B64 = (
@@ -1297,3 +1301,112 @@ class TestMaxPlanConfirmation:
         assert sdk.create_calls[1]["agent"] == AGENT_MAX
         # Asked once, before the plan — not again at execution time.
         assert confirm.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# RunSpec — the shape of a run, and the one store it writes to
+# ---------------------------------------------------------------------------
+
+
+class TestRunSpec:
+    """`execute_research` takes a value object, not 21 keyword arguments.
+
+    The point is not brevity: it is that anything a run's behavior
+    depends on has to be a named field, so it cannot be inferred from an
+    unrelated one (which is how `--max` on a follow-up skipped its cost
+    prompt for two releases).
+    """
+
+    def test_model_and_max_together_are_rejected_by_the_spec(self, tmp_path: Path) -> None:
+        # The invariant lives with the data, so no caller can forget it.
+        cfg_path = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        with pytest.raises(ConfigError) as excinfo:
+            RunSpec(
+                config=load_config(path=cfg_path),
+                display_query="q",
+                model="gemini-3.1-pro-preview",
+                use_max=True,
+            )
+        assert "mutually exclusive" in str(excinfo.value)
+        assert excinfo.value.exit_code == 4
+
+    def test_a_spec_needs_only_a_config_and_a_query(self, tmp_path: Path) -> None:
+        cfg_path = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        spec = RunSpec(config=load_config(path=cfg_path), display_query="q")
+        assert spec.use_max is False
+        assert spec.dry_run is False
+        assert spec.max_already_confirmed is False
+        assert spec.mcp_servers == ()
+
+
+class TestStoreIsOpenedOncePerRun:
+    """Opening the store re-reads the whole history from disk.
+
+    A run appends twice (in_progress, then terminal), and each append
+    used to open its own store — so every run paid to parse the entire
+    history twice, and a follow-up three times.
+    """
+
+    def test_a_research_run_loads_the_history_once(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intabcxyz123", status="in_progress"),
+            got=_fake_completed(id_="intabcxyz123"),
+        )
+        spy = mocker.spy(JsonlStore, "open")
+
+        result = runner.invoke(
+            app,
+            ["research", "Research TPUs", "--config", str(cfg), "--api-key", "AIzaSy-test-key-1"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert spy.call_count == 1
+        # Still recorded, and with the terminal status — the point was to
+        # stop re-reading, not to stop writing.
+        store = JsonlStore.open()
+        record = store.find_by_id("intabcxyz123")
+        assert record is not None
+        assert record.status == "completed"
+
+    def test_a_dry_run_never_touches_the_store(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        spy = mocker.spy(JsonlStore, "open")
+
+        result = runner.invoke(app, ["research", "q", "--config", str(cfg), "--dry-run"])
+
+        assert result.exit_code == 0
+        assert spy.call_count == 0
+
+    def test_a_follow_up_reuses_the_store_it_opened_for_the_parent(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        _install_fake_sdk(
+            mocker,
+            created=SimpleNamespace(id="intfollowup1", status="in_progress"),
+            got=_fake_completed(id_="intfollowup1"),
+        )
+        spy = mocker.spy(JsonlStore, "open")
+
+        result = runner.invoke(
+            app,
+            [
+                "follow-up",
+                "intparent001",
+                "Say more",
+                "--config",
+                str(cfg),
+                "--api-key",
+                "AIzaSy-test-key-1",
+                "--no-stream",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert spy.call_count == 1
