@@ -28,6 +28,7 @@ from gdr.constants import (
     STATUS_FAILED,
     TERMINAL_STATUSES,
 )
+from gdr.core.client import as_auth_error
 from gdr.errors import (
     NetworkError,
     ResearchCancelledError,
@@ -123,6 +124,12 @@ def poll_until_complete(
         try:
             interaction = get(id=interaction_id)
         except Exception as exc:
+            # Credentials don't get better with backoff. Retrying a 401
+            # burns five sleeps to reach the same answer and then reports
+            # it as a network problem — fail fast with the auth exit code.
+            auth = as_auth_error(exc, action="Polling failed")
+            if auth is not None:
+                raise auth from exc
             consecutive_failures += 1
             if consecutive_failures >= MAX_CONSECUTIVE_POLL_FAILURES:
                 raise NetworkError(

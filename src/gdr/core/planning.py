@@ -33,7 +33,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from gdr.core.client import GdrClient
+from gdr.core.client import GdrClient, as_auth_error
 from gdr.core.models import AgentConfig, InputPart
 from gdr.core.normalize import interaction_id_of, normalized_outputs
 from gdr.core.requests import serialize_input
@@ -139,8 +139,12 @@ def run_plan_phase(
     try:
         initial = client.interactions.create(**build_plan_kwargs(req))
     except Exception as exc:
-        # Same classification as the research pipeline: submission
-        # failures are network errors (exit 5), not generic failures.
+        # Same classification as the research pipeline: a rejected key is
+        # an auth problem (exit 4); anything else that fails to submit is
+        # a network error (exit 5), not a generic failure.
+        auth = as_auth_error(exc, action="Failed to create plan")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to create plan: {exc}") from exc
 
     interaction_id = extract_interaction_id(initial)

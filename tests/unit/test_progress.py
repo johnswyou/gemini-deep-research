@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from gdr.errors import (
+    ConfigError,
     NetworkError,
     ResearchCancelledError,
     ResearchFailedError,
@@ -182,6 +183,24 @@ class TestPollRetry:
         message = str(excinfo.value)
         assert "gdr resume int-2" in message
         assert "gdr status int-2" in message
+
+    def test_auth_failures_are_not_retried(self) -> None:
+        # Retrying a rejected key just burns 5 backoffs (~75s) to reach the
+        # same answer, and reports it as a network problem. Fail fast with
+        # the documented auth exit code instead.
+        calls = {"n": 0}
+
+        class FakeAuthError(Exception):
+            status_code = 401
+
+        def always_401(*, id: str) -> Any:
+            calls["n"] += 1
+            raise FakeAuthError("API key not valid")
+
+        with pytest.raises(ConfigError) as excinfo:
+            poll_until_complete(always_401, "int-auth", clock=FakeClock(), sleep=_noop_sleep)
+        assert calls["n"] == 1
+        assert "key" in str(excinfo.value).lower()
 
     def test_failure_counter_resets_after_success(self) -> None:
         # 4 failures, one success, 4 more failures: never reaches the cap of 5.

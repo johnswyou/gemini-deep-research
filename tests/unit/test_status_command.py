@@ -162,3 +162,46 @@ class TestTerminalTiming:
         assert "Duration" in result.output
         assert "10:00" in result.output
         assert "20:00:" not in result.output
+
+
+class TestStatusErrorClassification:
+    """Auth failures are exit 4 everywhere, not just in `gdr research`.
+
+    `status_code` mirrors the real google-genai compat error; that shape
+    is pinned by
+    test_sdk_contract.py::TestErrorClassificationContract.
+    """
+
+    def test_rejected_key_exits_4_with_an_actionable_message(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        class FakeAuthError(Exception):
+            status_code = 403
+
+        fake_interactions = MagicMock()
+        fake_interactions.get.side_effect = FakeAuthError("permission denied")
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            ["status", "intdone-1", "--api-key", "AIzaSy-test-key-XXXX"],
+        )
+        assert result.exit_code == 4
+        assert "key" in result.output.lower()
+
+    def test_transport_failure_still_exits_5(
+        self, runner: CliRunner, tmp_path: Path, mocker: Any
+    ) -> None:
+        fake_interactions = MagicMock()
+        fake_interactions.get.side_effect = ConnectionError("network down")
+        fake_client = MagicMock()
+        fake_client.interactions = fake_interactions
+        mocker.patch("google.genai.Client", return_value=fake_client)
+
+        result = runner.invoke(
+            app,
+            ["status", "intdone-1", "--api-key", "AIzaSy-test-key-XXXX"],
+        )
+        assert result.exit_code == 5

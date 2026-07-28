@@ -25,11 +25,13 @@ import inspect
 from pathlib import Path
 from typing import Any, get_args
 
+import httpx
 import pytest
 from pydantic import TypeAdapter
 
 from gdr.commands.research import _with_fallback_outputs
 from gdr.constants import STATUS_IN_PROGRESS, TERMINAL_STATUSES
+from gdr.core.client import is_auth_error
 from gdr.core.models import AgentConfig, FileSearchSpec, McpSpec, MediaPart, RunContext, TextPart
 from gdr.core.normalize import error_of, normalized_outputs
 from gdr.core.planning import PlanRequest, build_plan_kwargs
@@ -214,6 +216,56 @@ class TestCreatePayloadContract:
             )
         )
         self._assert_no_downgrades(kwargs)
+
+
+class TestErrorClassificationContract:
+    """Pin the shape of the exception the SDK raises for a rejected key.
+
+    `client.interactions` routes every call through the SDK's compat
+    error layer, whose exceptions carry the HTTP status as
+    ``status_code`` — NOT ``code``, which is what an earlier version of
+    the classifier read (and so never matched: a bad key exited 5 as a
+    "network error" instead of the documented 4).
+
+    The private import is deliberate: this is the only place that shape
+    exists, and an import failure here is exactly the signal to re-check
+    `gdr.core.client.is_auth_error` against the new SDK layout.
+    """
+
+    @staticmethod
+    def _sdk_error(status: int) -> BaseException:
+        # Imported here, not at module scope, so a future SDK reshuffle
+        # fails THIS test (the signal to re-check the classifier) instead
+        # of collapsing the whole contract module at import time.
+        from google.genai._gaos.lib.compat_errors import (  # noqa: PLC0415
+            APIError as CompatAPIError,
+        )
+
+        return CompatAPIError.generate(
+            status_code=status,
+            body={"error": {"code": status, "message": "API key not valid.", "status": "PERM"}},
+            message="API key not valid.",
+            response=httpx.Response(
+                status,
+                request=httpx.Request("POST", "https://generativelanguage.googleapis.com/"),
+            ),
+        )
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_real_auth_errors_are_classified_as_auth(self, status: int) -> None:
+        assert is_auth_error(self._sdk_error(status)) is True
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_real_non_auth_errors_are_not_classified_as_auth(self, status: int) -> None:
+        assert is_auth_error(self._sdk_error(status)) is False
+
+    def test_status_is_exposed_as_status_code_not_code(self) -> None:
+        # The regression this whole class exists for. If a future SDK adds
+        # `.code` back, the classifier reads either — but the stubs used by
+        # the command tests must keep mirroring what the SDK really carries.
+        exc = self._sdk_error(401)
+        assert exc.status_code == 401  # type: ignore[attr-defined]
+        assert getattr(exc, "code", None) is None
 
 
 class TestResponseAdapterAgainstRealTypes:

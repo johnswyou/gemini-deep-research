@@ -31,7 +31,7 @@ from gdr.constants import (
     TERMINAL_STATUSES,
     TOOL_URL_CONTEXT,
 )
-from gdr.core.client import GdrClient
+from gdr.core.client import GdrClient, as_auth_error
 from gdr.core.inputs import (
     ensure_url_context_tool,
     parse_file_search_stores,
@@ -598,14 +598,12 @@ def _submit_interaction(
     try:
         create_result = client.interactions.create(**kwargs)
     except Exception as exc:
-        # google-genai's APIError carries the HTTP status in `.code`. A
-        # rejected key is an auth problem (documented exit 4), not a
-        # network failure (exit 5).
-        if getattr(exc, "code", None) in (401, 403):
-            raise ConfigError(
-                f"The API rejected the request as unauthorized: {exc}. "
-                f"Check your API key (`gdr doctor` shows which one is active)."
-            ) from exc
+        # A rejected key is an auth problem (documented exit 4), not a
+        # network failure (exit 5). The status lives on `.status_code`;
+        # see gdr.core.client.http_status_of.
+        auth = as_auth_error(exc, action="Failed to start research")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to start research: {exc}") from exc
 
     record_stream_start, recorded_dirs = _make_stream_start_recorder(
@@ -762,6 +760,9 @@ def _finalize_and_render(
         try:
             latest = client.interactions.get(id=interaction_id)
         except Exception as exc:
+            auth = as_auth_error(exc, action=f"Failed to fetch interaction {interaction_id}")
+            if auth is not None:
+                raise auth from exc
             raise NetworkError(
                 f"Failed to fetch interaction {interaction_id}: {exc}. "
                 f"The research may still be running — try `gdr resume {interaction_id}`."

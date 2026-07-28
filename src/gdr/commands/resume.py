@@ -40,6 +40,7 @@ from gdr.commands._common import (
     open_store,
 )
 from gdr.constants import STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, TERMINAL_STATUSES
+from gdr.core.client import as_auth_error
 from gdr.core.models import AgentConfig, Record, RunContext
 from gdr.core.rendering import write_artifacts
 from gdr.core.security import SecurityPolicy
@@ -88,6 +89,9 @@ def run(
     try:
         latest = client.interactions.get(id=interaction_id)
     except Exception as exc:
+        auth = as_auth_error(exc, action=f"Failed to fetch interaction {interaction_id}")
+        if auth is not None:
+            raise auth from exc
         raise NetworkError(f"Failed to fetch interaction {interaction_id}: {exc}") from exc
 
     status = str(get_attr_or_key(latest, "status") or "unknown")

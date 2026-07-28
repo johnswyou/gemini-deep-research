@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   URL, headers and all — with an `UNKNOWN` placeholder, so any server
   configured with `allowed_tools` was silently never attached to the
   run. The allowlist now goes out as `[{"tools": [...]}]`.
+- **A rejected API key exits 4 (auth), not 5 (network).** The classifier
+  read `exc.code`, but google-genai's Interactions errors carry the HTTP
+  status on `status_code`, so the auth branch never fired. Auth failures
+  are now classified — and given the "check your API key" hint — in
+  `research`, `status`, `resume`, `cancel`, and the planning flow. The
+  polling loop no longer burns five retries with backoff on a rejected
+  key before giving up.
 
 ### Testing
 
@@ -23,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kwarg names: tools, input parts, and `agent_config` are parsed through
   the SDK's own unions and any `Unknown*` downgrade fails the build.
   This is the check that would have caught the `allowed_tools` bug.
+- The shape of the SDK's auth exception (`status_code`, not `code`) is
+  pinned by a contract test, so the stubs used elsewhere in the suite
+  can't drift from the real thing again.
 
 ## [0.1.4] - 2026-07-07
 
