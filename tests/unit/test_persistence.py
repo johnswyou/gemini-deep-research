@@ -95,9 +95,9 @@ class TestJsonlStore:
         found = store.find_by_id("abc")
         assert found is not None
         assert found.status == "completed"
-        # The file retains both lines (append-only), but the in-memory index
-        # reflects the latest value. Consumers of the file should treat the
-        # last entry per id as authoritative.
+        # Writes stay append-only, so the file holds both lines until a
+        # later `open()` compacts it (see TestCompaction). Consumers of
+        # the raw file must treat the last entry per id as authoritative.
 
     def test_recent_sorts_by_created_at_descending(self, tmp_path: Path) -> None:
         store = JsonlStore.open(tmp_path / "s.jsonl")
@@ -186,3 +186,120 @@ class TestSchemaEvolution:
         store_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
         store = JsonlStore.open(store_path)
         assert store.find_by_id("intcompat1") is not None
+
+
+# ---------------------------------------------------------------------------
+# Compaction + retention
+# ---------------------------------------------------------------------------
+
+
+def _lines(path: Path) -> list[str]:
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _write_run(store: JsonlStore, id_: str, *, created_at: datetime) -> None:
+    """Two appends, exactly like a real run: in_progress, then terminal."""
+    store.append(_record(id_=id_, status="in_progress", created_at=created_at))
+    store.append(_record(id_=id_, status="completed", created_at=created_at))
+
+
+class TestCompaction:
+    """The file must not grow forever.
+
+    Every run appends twice (in_progress, then the terminal row), so the
+    file grows at roughly double the rate of the history it represents,
+    and nothing ever removed the superseded rows.
+    """
+
+    def test_reopening_drops_superseded_rows(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        base = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        for i in range(80):
+            _write_run(store, f"run{i:03d}", created_at=base + timedelta(minutes=i))
+
+        assert len(_lines(path)) == 160  # append-only during the run
+        reopened = JsonlStore.open(path)
+        assert len(_lines(path)) == 80  # one row per interaction
+        assert len(reopened) == 80
+
+    def test_compaction_keeps_the_latest_row_per_id(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        base = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        for i in range(80):
+            _write_run(store, f"run{i:03d}", created_at=base + timedelta(minutes=i))
+
+        reopened = JsonlStore.open(path)
+        found = reopened.find_by_id("run007")
+        assert found is not None
+        assert found.status == "completed"
+        # And the surviving row on disk says so too.
+        rows = {json.loads(ln)["id"]: json.loads(ln)["status"] for ln in _lines(path)}
+        assert rows["run007"] == "completed"
+
+    def test_a_tight_file_is_left_alone(self, tmp_path: Path) -> None:
+        # No dead rows worth reclaiming: don't rewrite the user's file
+        # (or churn the disk) on every single command.
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        store.append(_record(id_="a"))
+        store.append(_record(id_="b"))
+        before = path.read_bytes()
+
+        JsonlStore.open(path)
+        assert path.read_bytes() == before
+
+    def test_history_is_capped_at_max_records(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        base = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        for i in range(10):
+            store.append(_record(id_=f"run{i}", created_at=base + timedelta(minutes=i)))
+
+        reopened = JsonlStore.open(path, max_records=3)
+        assert len(reopened) == 3
+        assert [r.id for r in reopened.recent()] == ["run9", "run8", "run7"]
+        assert len(_lines(path)) == 3
+        # The oldest are gone from the index, not merely hidden.
+        assert reopened.find_by_id("run0") is None
+
+    def test_cap_of_zero_means_unlimited(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        base = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        for i in range(10):
+            store.append(_record(id_=f"run{i}", created_at=base + timedelta(minutes=i)))
+
+        assert len(JsonlStore.open(path, max_records=0)) == 10
+
+    def test_a_file_that_wholly_failed_to_parse_is_never_truncated(self, tmp_path: Path) -> None:
+        # An empty index next to a non-empty file means we could not read
+        # it — the one situation where rewriting would destroy data we do
+        # not understand.
+        path = tmp_path / "s.jsonl"
+        path.write_text("garbage\n" * 200, encoding="utf-8")
+        JsonlStore.open(path, max_records=1)
+        assert len(_lines(path)) == 200
+
+    def test_compaction_leaves_no_temp_file_behind(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        base = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        for i in range(80):
+            _write_run(store, f"run{i:03d}", created_at=base + timedelta(minutes=i))
+
+        JsonlStore.open(path)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["s.jsonl"]
+
+    def test_rows_survive_a_round_trip_through_compaction(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        store = JsonlStore.open(path)
+        base = datetime(2026, 4, 22, 14, 30, tzinfo=_UTC)
+        original = _record(id_="keeper", status="completed", created_at=base, query="Research TPUs")
+        store.append(original)
+        for i in range(80):
+            _write_run(store, f"run{i:03d}", created_at=base + timedelta(minutes=i + 1))
+
+        reopened = JsonlStore.open(path)
+        assert reopened.find_by_id("keeper") == original

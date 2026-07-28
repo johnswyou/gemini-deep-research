@@ -5,6 +5,11 @@ Records are appended one-per-line as JSON to an append-only file at
 interactions.jsonl``). On load we build an in-memory index keyed by
 interaction id — O(1) lookup, cheap even at tens of thousands of rows.
 
+Writes are append-only, but ``open()`` compacts: superseded rows are
+dropped (a run writes its id twice — ``in_progress``, then terminal) and
+the history is trimmed to :data:`MAX_RECORDS`. Without that the file
+grows forever and every command pays to parse it.
+
 This module exposes a :class:`Store` Protocol so callers depend on a small,
 testable interface. Phase 3 ships a single :class:`JsonlStore` implementation
 behind it; a SQLite-backed variant can drop in later without any caller
@@ -24,6 +29,19 @@ from typing import Protocol
 from gdr.core.models import Record
 
 _STORE_FILENAME = "interactions.jsonl"
+
+# Hard cap on retained records, applied when the store is opened. The
+# store is a local *index*, not a ledger: pruning it never touches the
+# artifacts on disk, it only means `gdr show`/`gdr ls` stop resolving
+# very old ids. 5000 Deep Research runs is far beyond any real history.
+# 0 disables the cap.
+MAX_RECORDS = 5000
+
+# One row per interaction is the steady state, but a run appends twice
+# (in_progress as soon as the id is known, then the terminal row), so
+# dead rows accrue at roughly one per run. Rewriting the whole file on
+# every open would be pointless churn — wait until enough have piled up.
+_DEAD_ROW_FLOOR = 64
 
 
 # ---------------------------------------------------------------------------
@@ -102,23 +120,36 @@ class JsonlStore:
     # -- construction --------------------------------------------------
 
     @classmethod
-    def open(cls, path: Path | None = None) -> JsonlStore:
-        """Open or create the store. Missing parent dirs are created."""
+    def open(cls, path: Path | None = None, *, max_records: int = MAX_RECORDS) -> JsonlStore:
+        """Open or create the store. Missing parent dirs are created.
+
+        Opening is also when the file gets tidied: superseded rows are
+        dropped and the history is trimmed to ``max_records`` (0 keeps
+        everything). See :meth:`_compact_if_needed`.
+        """
         target = path if path is not None else default_store_path()
         target.parent.mkdir(parents=True, exist_ok=True)
         store = cls(path=target)
-        store._load()
+        rows = store._load()
+        store._compact_if_needed(rows, max_records=max_records)
         return store
 
-    def _load(self) -> None:
+    def _load(self) -> int:
+        """Rebuild the index from disk; return the number of rows read.
+
+        The count includes rows that failed to parse — they occupy the
+        file just the same, and compaction is what reclaims them.
+        """
         self._index.clear()
         if not self.path.exists():
-            return
+            return 0
+        rows = 0
         with self.path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 stripped = line.strip()
                 if not stripped:
                     continue
+                rows += 1
                 try:
                     data = json.loads(stripped)
                 except json.JSONDecodeError:
@@ -130,6 +161,49 @@ class JsonlStore:
                 except (ValueError, TypeError):
                     continue
                 self._index[record.id] = record
+        return rows
+
+    # -- compaction ----------------------------------------------------
+
+    def _compact_if_needed(self, rows_on_disk: int, *, max_records: int) -> None:
+        """Rewrite the file from the index when it has gone slack.
+
+        Two triggers: accumulated dead rows (superseded ids and lines
+        that no longer parse) and the retention cap.
+
+        Never runs when the index is empty but the file is not. That
+        means every row failed to parse, and truncating a file we could
+        not read would be the worst possible response to not
+        understanding it.
+        """
+        if not self._index:
+            return
+        over_cap = 0 < max_records < len(self._index)
+        if not over_cap and rows_on_disk - len(self._index) < _DEAD_ROW_FLOOR:
+            return
+        self._rewrite(max_records=max_records if over_cap else 0)
+
+    def _rewrite(self, *, max_records: int) -> None:
+        """Replace the file with one line per retained record, atomically.
+
+        Best-effort by design, like every other write here: a read-only
+        state dir, a full disk, or a race with another gdr process must
+        not break the command the user actually ran.
+        """
+        tmp = self.path.with_name(self.path.name + ".compact")
+        try:
+            ordered = sorted(self._index.values(), key=lambda r: r.created_at)
+            if max_records > 0:
+                ordered = ordered[-max_records:]
+                self._index = {record.id: record for record in ordered}
+            with tmp.open("w", encoding="utf-8") as fh:
+                for record in ordered:
+                    fh.write(record.model_dump_json() + "\n")
+            tmp.replace(self.path)
+        except (OSError, TypeError):
+            # TypeError: a mix of naive and aware `created_at` values makes
+            # the sort uncomparable. Leave the file exactly as it was.
+            tmp.unlink(missing_ok=True)
 
     # -- mutators ------------------------------------------------------
 
