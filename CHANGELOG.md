@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP servers with `allowed_tools` are attached again.** gdr sent the
+  allowlist as a list of bare tool names, but the API models it as a
+  list of allowlist objects. The SDK's tool union is *lenient*: rather
+  than erroring, it replaced the **entire** `mcp_server` entry — name,
+  URL, headers and all — with an `UNKNOWN` placeholder, so any server
+  configured with `allowed_tools` was silently never attached to the
+  run. The allowlist now goes out as `[{"tools": [...]}]`.
+
+### Testing
+
+- The SDK contract suite now validates request *payloads*, not just
+  kwarg names: tools, input parts, and `agent_config` are parsed through
+  the SDK's own unions and any `Unknown*` downgrade fails the build.
+  This is the check that would have caught the `allowed_tools` bug.
+
 ## [0.1.4] - 2026-07-07
 
 ### Fixed

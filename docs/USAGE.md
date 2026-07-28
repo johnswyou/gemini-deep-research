@@ -469,7 +469,7 @@ All keys are optional; every one has a default.
 | `safe_untrusted` | bool | `true` | When `--file`/`--url` is passed, auto-enable untrusted mode. |
 | `mcp_servers.<name>.url` | string | — | MCP server endpoint. |
 | `mcp_servers.<name>.headers.<Header>` | string | — | Headers. `env:VAR` expansion supported. |
-| `mcp_servers.<name>.allowed_tools` | list\[string\] | `None` | Optional allowlist of MCP tool names. |
+| `mcp_servers.<name>.allowed_tools` | list\[string\] | `None` | Optional allowlist of MCP tool names. Sent as the API's allowlist-object form; an empty list is treated as "no restriction". |
 
 ---
 

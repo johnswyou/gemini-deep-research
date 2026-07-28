@@ -63,6 +63,38 @@ class TestBuildTools:
         assert mcp_entry["name"] == "deploys"
         assert mcp_entry["headers"] == {"Authorization": "Bearer x"}
 
+    def test_mcp_allowed_tools_use_the_api_object_form(self, tmp_path: Path) -> None:
+        # The API models `allowed_tools` as a list of allowlist *objects*
+        # ({mode, tools}), not a list of bare tool names. Sending bare
+        # strings fails MCPServer validation inside the SDK, whose lenient
+        # open union then rewrites the WHOLE mcp_server entry to an
+        # `UNKNOWN` placeholder — the server is silently never attached.
+        mcp = McpSpec(
+            name="deploys",
+            url="https://mcp.example.com/mcp",
+            allowed_tools=("list_deploys", "get_status"),
+        )
+        ctx = _ctx(mcp_servers=(mcp,))
+        tools, _ = build_tools(ctx, _policy(tmp_path))
+        assert tools[-1]["allowed_tools"] == [{"tools": ["list_deploys", "get_status"]}]
+
+    def test_mcp_without_allowed_tools_omits_the_key(self, tmp_path: Path) -> None:
+        ctx = _ctx(mcp_servers=(McpSpec(name="deploys", url="https://mcp.example.com/mcp"),))
+        tools, _ = build_tools(ctx, _policy(tmp_path))
+        assert "allowed_tools" not in tools[-1]
+
+    def test_mcp_empty_allowed_tools_omits_the_key(self, tmp_path: Path) -> None:
+        # An empty allowlist is not "allow nothing" — it is "the user
+        # configured no restriction". Emitting `[{"tools": []}]` would ask
+        # the API to forbid every tool on the server.
+        ctx = _ctx(
+            mcp_servers=(
+                McpSpec(name="deploys", url="https://mcp.example.com/mcp", allowed_tools=()),
+            )
+        )
+        tools, _ = build_tools(ctx, _policy(tmp_path))
+        assert "allowed_tools" not in tools[-1]
+
     def test_invalid_mcp_header_aborts(self, tmp_path: Path) -> None:
         # Pydantic validation on McpSpec doesn't check for CR/LF — that's the
         # security policy's job. We construct a spec with a bad header value
