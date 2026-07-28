@@ -116,10 +116,11 @@ never reach the API.
 
 ### Redaction
 
-When `transcript.json` is written, MCP headers whose names contain
-any of `auth`, `token`, `key`, `secret`, `cookie` (case-insensitive)
-are replaced with `[REDACTED]`. Original values are never touched
-in-memory past the initial send.
+When `transcript.json` is written — or a request is previewed with
+`--dry-run` — MCP headers whose names contain any of `auth`, `token`,
+`key`, `secret`, `cookie` (case-insensitive) are replaced with
+`[REDACTED]`. Original values are never touched in-memory past the
+initial send.
 
 Example transcript snippet:
 
@@ -164,17 +165,35 @@ To **keep** MCP servers while grounding in a file, set
 `safe_untrusted = false` in config (accepts the risk). `gdr` will
 still strip them if `--untrusted-input` is passed explicitly.
 
-### No secret exfiltration via `--dry-run`
+### `--dry-run` masks secrets by default
 
-The `--dry-run` output includes the full request JSON, which
-includes MCP header values. This is intentional — the point of
-`--dry-run` is to show exactly what would hit the wire. If you don't
-want secrets in your terminal scrollback, unset the env var before
-running:
+The `--dry-run` output is the full request JSON, which includes your
+MCP headers — and a config-declared `headers.Authorization =
+"Bearer env:DEPLOY_TOKEN"` reaches this point already expanded, so
+what would print is the live token, not the placeholder you wrote.
+Header values whose *name* contains `auth`, `token`, `key`, `secret`,
+or `cookie` are therefore masked as `[REDACTED]`, and the preview says
+so. Everything else — server name, URL, allowlist — prints in full.
 
 ```bash
-(unset GEMINI_API_KEY DEPLOY_TOKEN; gdr research --dry-run --mcp ...)
+gdr research "..." --dry-run
+#   "headers": {"Authorization": "[REDACTED]"}
 ```
+
+A header with a name outside that list (say `X-Deploy`) is *not*
+masked — the matcher works on names, not on how secret the value
+looks.
+
+Pass `--reveal` when you actually need to eyeball the token — the same
+opt-in `gdr config get --reveal` uses:
+
+```bash
+gdr research "..." --dry-run --reveal --mcp ...
+```
+
+`--reveal` is available on every command that takes `--dry-run`
+(`gdr research`, `gdr follow-up`, `gdr plan approve`) and does nothing
+on a real run.
 
 ---
 

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Works through section B of `docs/CODE_REVIEW_v0.1.4.md` — the
+lower-priority hardening left open when 0.2.0 shipped.
+
+### Security
+
+- **`--dry-run` no longer prints MCP auth headers in the clear.** The
+  preview is built after `env:` expansion, so a config-declared
+  `Bearer env:DEPLOY_TOKEN` header rendered as the live token into
+  terminal scrollback and CI logs. Auth-ish headers now print as
+  `[REDACTED]`, matching `gdr config get`. Pass the new `--reveal` flag
+  (on `gdr research`, `gdr follow-up`, and `gdr plan approve`) to print
+  them anyway.
+
+### Fixed
+
+- **Tool-step text can no longer leak into the report.** The stream
+  aggregator appended every `text` delta to the report buffer whatever
+  step produced it; only `model_output` steps carry report body, which
+  is the rule the fetch path already enforced. Deep Research does not
+  emit text on tool steps today, so this closes the hole rather than
+  fixing an observed corruption.
+- **A second `interaction.created` event can no longer overwrite or null
+  a known interaction id.** `_handle_start` now assigns defensively, the
+  way `_handle_status_update` already did. The typed SDK event requires
+  an id, so this is hardening for replayed/raw-dict streams rather than
+  a bug anyone has hit — losing the id costs the caller the
+  `gdr resume` hint.
+
+### Changed
+
+- **`transcript.json` no longer duplicates inline base64.** Image,
+  document, audio, and video payloads are replaced with
+  `[inline data omitted: N base64 chars]`; `type`, `mime_type`, and
+  `uri` are kept. Images are still decoded to `images/` as before, so
+  nothing is lost — a visualization-heavy Max run just stops writing
+  the same megabytes twice. Anything parsing base64 out of
+  `transcript.json` should read `images/` instead.
+
+### Internal
+
+- CI and release workflows moved off the Node 20 actions GitHub is
+  deprecating: `actions/checkout` v4 → v7.0.1 and `astral-sh/setup-uv`
+  v3 → v9.0.0, still pinned to commit SHAs. Note that setup-uv v9
+  defaults `prune-cache` to `false`, so CI caches will be larger.
+
 ## [0.2.0] - 2026-07-28
 
 Remediates the confirmed defects from `docs/CODE_REVIEW_v0.1.4.md`. The
