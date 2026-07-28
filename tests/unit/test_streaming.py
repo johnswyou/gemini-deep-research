@@ -274,6 +274,94 @@ class TestImageFlushOnComplete:
 
 
 # ---------------------------------------------------------------------------
+# Step-scoped report buffer (2026-07 review B: the fetch-path leak, streamed)
+# ---------------------------------------------------------------------------
+
+
+class TestReportBufferIsStepScoped:
+    """Only ``model_output`` steps carry report body — same rule as the
+    fetch path (``normalize._BODY_STEP_TYPES``).
+
+    Tool-call steps are timeline context. If one ever emits a text delta,
+    it must not silently splice itself into ``report.md``.
+    """
+
+    @staticmethod
+    def _feed(agg: StreamAggregator, step_type: str, text: str, *, index: int) -> None:
+        agg.feed({"event_type": "step.start", "index": index, "step": {"type": step_type}})
+        agg.feed(
+            {"event_type": "step.delta", "index": index, "delta": {"type": "text", "text": text}}
+        )
+        agg.feed({"event_type": "step.stop", "index": index})
+
+    def test_tool_call_step_text_stays_out_of_the_report(self) -> None:
+        emitted: list[StreamEvent] = []
+        agg = StreamAggregator(on_event=emitted.append)
+        self._feed(agg, "google_search_call", "query: tpu roadmap", index=0)
+        self._feed(agg, "model_output", "# The actual report", index=1)
+
+        snapshot = agg.snapshot()
+        assert snapshot.text == "# The actual report"
+        assert [e.text for e in emitted if e.kind == "text_delta"] == ["# The actual report"]
+
+    def test_user_input_step_text_stays_out_of_the_report(self) -> None:
+        agg = StreamAggregator()
+        self._feed(agg, "user_input", "the original question", index=0)
+        assert agg.snapshot().text == ""
+
+    def test_legacy_text_content_start_still_counts_as_body(self) -> None:
+        # The legacy schema has no step type — a `content.start` of type
+        # "text" is the report block.
+        agg = StreamAggregator()
+        agg.feed({"event_type": "content.start", "index": 0, "content": {"type": "text"}})
+        agg.feed(
+            {"event_type": "content.delta", "index": 0, "delta": {"type": "text", "text": "hello"}}
+        )
+        assert agg.snapshot().text == "hello"
+
+    def test_text_without_a_start_event_is_still_kept(self) -> None:
+        # No start event means no step type to judge by. Dropping real
+        # report text is worse than the leak this class guards against.
+        agg = StreamAggregator()
+        agg.feed(
+            {"event_type": "step.delta", "index": 3, "delta": {"type": "text", "text": "orphan"}}
+        )
+        assert agg.snapshot().text == "orphan"
+
+
+# ---------------------------------------------------------------------------
+# Interaction id stability
+# ---------------------------------------------------------------------------
+
+
+class TestInteractionIdStability:
+    def test_replayed_created_event_cannot_null_a_known_id(self) -> None:
+        # A resumed stream replays from `last_event_id`; an idless or
+        # differently-shaped `interaction.created` must not cost us the id
+        # the caller needs for `gdr resume`.
+        agg = StreamAggregator()
+        agg.feed(
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "int-keep-001", "status": "in_progress"},
+            }
+        )
+        agg.feed({"event_type": "interaction.created", "interaction": {}})
+        assert agg.interaction_id == "int-keep-001"
+
+    def test_replayed_created_event_cannot_blank_a_known_status(self) -> None:
+        agg = StreamAggregator()
+        agg.feed(
+            {
+                "event_type": "interaction.created",
+                "interaction": {"id": "int-keep-002", "status": "in_progress"},
+            }
+        )
+        agg.feed({"event_type": "interaction.created", "interaction": {"id": "int-keep-002"}})
+        assert agg.status == "in_progress"
+
+
+# ---------------------------------------------------------------------------
 # Current-schema edge fixtures (parity with the legacy-schema goldens)
 # ---------------------------------------------------------------------------
 
