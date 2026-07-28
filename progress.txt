@@ -159,6 +159,20 @@ re-learn them.
   `Any` generically.
 
 ### Domain architecture
+- **A run is described by `commands/research.RunSpec`,** a frozen
+  dataclass built at the command boundary by `research`, `plan approve`,
+  and `follow-up`. `execute_research(spec, *, console, store=None)` and
+  the private helpers below it all take it. Rules:
+  - Anything a run's behavior depends on is a NAMED FIELD. Never infer
+    behavior from an unrelated field (`previous_interaction_id` read as
+    consent is what shipped the `follow-up --max` bug).
+  - Invariants live on the spec (`__post_init__`), not at one call site,
+    so a new caller can't skip them. `dataclasses.replace()` re-runs
+    them. Build the spec before any I/O so bad flag combinations fail
+    first.
+  - Derived values are `@property` (e.g. `spec.policy`), never
+    parameters - a threaded copy can disagree with its source.
+  - `console` and the store stay OUT of the spec: they are I/O ports.
 - **`core/normalize.py` is THE response adapter.** All readers of a
   completed interaction (rendering, planning, status, resume) go
   through `normalized_outputs()` / `raw_output_items()` — never read
@@ -173,8 +187,8 @@ re-learn them.
   `typer.Exit(code=5)`.
 - **Records are written twice per run:** in_progress right after the
   interaction id is known, terminal at the end. JsonlStore.append is
-  last-write-wins per id. Never move `_record_run` back behind
-  write_artifacts only.
+  last-write-wins per id (and `open()` later drops the superseded row).
+  Never move `_record_run` back behind write_artifacts only.
 - **Confinement is allocation-time policy:** derived output dirs are
   confined in `_allocate_output_dir`; explicit `--output` is exempt;
   `write_artifacts` never confines.
@@ -324,6 +338,19 @@ re-learn them.
   wire it through `redact_sensitive` and add `--reveal`.
 
 ### Storage + paths
+- **The store is an index, not a ledger.** `JsonlStore.open()` compacts:
+  one row per interaction (a run appends twice - `in_progress`, then
+  terminal), capped at `MAX_RECORDS = 5000` newest. Writes stay
+  append-only; tidying happens on open, past a 64-dead-row floor so
+  ordinary opens do no disk work. Pruning drops index entries only -
+  artifacts under `output_dir` are never touched. A file whose every row
+  failed to parse is NEVER rewritten (empty index + non-empty file =
+  "we could not read this", not "this is empty").
+- **Open the store once per command and pass it down.** Opening re-reads
+  the whole history. `execute_research` takes `store: Store | None` and
+  opens one after the dry-run/confirm gates (so a dry run touches no
+  disk); `follow-up` passes the store it opened for the parent lookup.
+  `_record_run` takes a required `store` - it must never open its own.
 - Store: `$GDR_STATE_DIR` → `$XDG_STATE_HOME/gdr/` → `~/.local/state/gdr/`.
 - Config: `$GDR_CONFIG_PATH` → `$XDG_CONFIG_HOME/gdr/config.toml` →
   `~/.config/gdr/config.toml`.
@@ -2210,3 +2237,72 @@ with behavior changes.
     two can both be true if only one of several sites was covered.
   - Writing the "nothing to redact -> no notice" test first is what kept
     the announcement line from firing on every plain dry run.
+
+---
+
+## 2026-07-28 (late) - Section B, remaining two items
+
+Closed the last two bullets of section B, which the previous entry had
+left open by design. Branch `claude/runspec-and-store`, on top of
+`claude/section-b-hardening`.
+
+**JsonlStore growth (`fd4cdaf`)**
+
+`open()` now compacts. Two triggers: dead rows (a run appends its id
+twice, so ~1 dead row per run accrues; the floor is 64 so ordinary
+opens do no disk work) and the retention cap (`MAX_RECORDS = 5000`,
+newest kept). The rewrite is a temp file + `Path.replace`, and is
+best-effort: `except (OSError, TypeError)` unlinks the temp and leaves
+the original alone. A file whose every row failed to parse is never
+rewritten - an empty index next to a non-empty file means we could not
+read it, and truncating data we do not understand is the worst answer
+available.
+
+**RunSpec (`0cf1678`)**
+
+`execute_research` 21 params -> 3; `_build_run_context` 13 -> 2;
+`_build_request_kwargs` 5 -> 2; `_submit_interaction` 10 -> 7;
+`_finalize_and_render` 10 -> 9. Two duplicated facts collapsed:
+`SecurityPolicy` became a derived `spec.policy` property, and
+`_finalize_and_render` reads `ctx.output_dir` instead of a
+`final_output_dir` that was always the same value. The `--model` +
+`--max` invariant moved into `RunSpec.__post_init__`.
+
+Store threading came with it: `execute_research` opens one store per
+run and passes it to both `_record_run` calls; `follow-up` hands over
+the store it already opened for the parent lookup. Measured, not
+assumed - a temporary spy on `JsonlStore.open` across the same command
+on both trees:
+
+    OLD: research 2 opens, follow-up 3 opens
+    NEW: research 1 open,  follow-up 1 open
+
+**Files changed:** `src/gdr/core/persistence.py`,
+`src/gdr/commands/{research,follow_up,plan}.py`,
+`tests/unit/{test_persistence,test_research_command}.py`,
+`CHANGELOG.md`, `docs/{USAGE,TROUBLESHOOTING}.md`, `progress.txt`.
+
+Section B of docs/CODE_REVIEW_v0.1.4.md is now fully remediated.
+
+- **Learnings for future iterations:**
+  - To prove a refactor's claim on the OLD tree, the probe must not
+    import anything new. The first attempt imported helpers from
+    `test_research_command.py`, which by then imported `RunSpec` - so
+    the old-code run died at collection and printed nothing. A
+    self-contained probe file (its own `runner` fixture, its own SDK
+    fake) that writes its measurement to a file outside the repo works
+    on both trees, and `git stash push <specific files>` switches
+    between them. Stash the *tests* too.
+  - `mocker.spy(JsonlStore, "open")` counts real loads regardless of
+    which module imported the class - better than patching
+    `open_store` in one module and missing the other two.
+  - Ruff PTH105 forbids `os.replace`; use `Path.replace` (still atomic).
+  - When a dataclass field is derived from other fields, make it a
+    `@property`, not a constructor argument. Frozen dataclasses can't
+    use `functools.cached_property`; a plain property recomputing a
+    two-field frozen object is cheap enough.
+  - `dataclasses.replace()` on a frozen spec re-runs `__post_init__`,
+    so invariants still hold after a late adjustment (follow-up
+    inheriting the parent's untrusted posture). Build the spec BEFORE
+    the I/O that might adjust it, so an impossible flag combination
+    fails before anything is opened or printed.

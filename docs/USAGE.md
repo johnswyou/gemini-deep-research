@@ -169,6 +169,14 @@ approval step.
 List recent interactions from the local JsonlStore. Pure local
 operation — no API calls.
 
+The store lives at `$GDR_STATE_DIR/interactions.jsonl` (see
+[environment variables](#environment-variables)) and is tidied whenever
+it is opened: superseded rows are dropped so each interaction keeps one
+line, and the history is capped at the 5000 most recent runs. Pruning
+only affects this index — the artifacts under `output_dir` are never
+touched — but `gdr show`/`gdr resume` will stop resolving ids older
+than the cap.
+
 ### Flags
 
 | Flag | Purpose |

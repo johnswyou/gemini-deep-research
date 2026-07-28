@@ -35,6 +35,15 @@ lower-priority hardening left open when 0.2.0 shipped.
   a bug anyone has hit — losing the id costs the caller the
   `gdr resume` hint.
 
+- **`interactions.jsonl` no longer grows without bound.** Every run
+  appends its id twice (`in_progress`, then the terminal row) and
+  nothing ever reclaimed the superseded lines, so the local history
+  file grew at roughly double the rate of the history it represented —
+  and every command that reads it paid to parse all of it. Opening the
+  store now compacts: one row per interaction, capped at the newest
+  5000. Pruning drops index entries only; the artifacts on disk are
+  untouched. A file whose every row failed to parse is never rewritten.
+
 ### Changed
 
 - **`transcript.json` no longer duplicates inline base64.** Image,
@@ -47,6 +56,17 @@ lower-priority hardening left open when 0.2.0 shipped.
 
 ### Internal
 
+- **`execute_research` takes a `RunSpec` instead of 21 keyword
+  arguments** (`_build_run_context`, 13 → 2). The value object is not
+  about brevity: it makes every input to a run a named field, so
+  behavior stops being inferred from whatever is in scope — the failure
+  mode that let `--max` skip its cost prompt on follow-ups. The
+  `--model` + `--max` rule now lives on the spec itself. The security
+  policy is derived from the spec rather than threaded beside it, and
+  `_finalize_and_render` reads `ctx.output_dir` instead of taking a
+  second copy of it. No user-visible change.
+- A research run now loads the local history once instead of twice, and
+  a follow-up once instead of three times.
 - CI and release workflows moved off the Node 20 actions GitHub is
   deprecating: `actions/checkout` v4 → v7.0.1 and `astral-sh/setup-uv`
   v3 → v9.0.0, still pinned to commit SHAs. Note that setup-uv v9
