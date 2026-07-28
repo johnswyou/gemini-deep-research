@@ -112,6 +112,58 @@ class TestDryRun:
         assert '"test query"' in result.output or "test query" in result.output
 
 
+class TestDryRunRedaction:
+    """`--dry-run` must not paste live credentials into scrollback.
+
+    The kwargs are post-`env:` expansion, so an MCP auth header here is
+    the real token — the same reason `gdr config get` redacts by default.
+    """
+
+    _ARGS = (
+        "--mcp",
+        "deploy=https://mcp.example.com",
+        "--mcp-header",
+        "deploy=Authorization:Bearer super-secret-token",
+        "--dry-run",
+    )
+
+    def test_mcp_auth_header_is_redacted_by_default(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        result = runner.invoke(app, ["research", "q", "--config", str(cfg), *self._ARGS])
+
+        assert result.exit_code == 0
+        assert "super-secret-token" not in result.output
+        assert "REDACTED" in result.output
+        # Everything else still previewed — the point of a dry run.
+        assert "https://mcp.example.com" in result.output
+
+    def test_redaction_is_announced_so_it_is_not_mistaken_for_the_wire_shape(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        result = runner.invoke(app, ["research", "q", "--config", str(cfg), *self._ARGS])
+        assert "--reveal" in result.output
+
+    def test_reveal_prints_the_secret(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        result = runner.invoke(
+            app, ["research", "q", "--config", str(cfg), *self._ARGS, "--reveal"]
+        )
+
+        assert result.exit_code == 0
+        assert "super-secret-token" in result.output
+
+    def test_no_redaction_notice_when_there_is_nothing_to_redact(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg = _write_config(tmp_path, output_dir=tmp_path / "reports")
+        result = runner.invoke(app, ["research", "q", "--config", str(cfg), "--dry-run"])
+        assert result.exit_code == 0
+        assert "--reveal" not in result.output
+
+
 # ---------------------------------------------------------------------------
 # happy path
 # ---------------------------------------------------------------------------

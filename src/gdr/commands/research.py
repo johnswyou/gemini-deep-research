@@ -55,7 +55,7 @@ from gdr.core.persistence import JsonlStore, Store
 from gdr.core.planning import interactive_plan_loop
 from gdr.core.rendering import write_artifacts
 from gdr.core.requests import build_create_kwargs
-from gdr.core.security import SecurityPolicy, id_fragment, sanitize_slug
+from gdr.core.security import SecurityPolicy, id_fragment, redact_sensitive, sanitize_slug
 from gdr.errors import (
     EXIT_INTERRUPTED,
     ConfigError,
@@ -308,6 +308,11 @@ def run(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the request body as JSON and exit without calling the API."
     ),
+    reveal: bool = typer.Option(
+        False,
+        "--reveal",
+        help="With --dry-run, print MCP auth headers in the clear instead of [REDACTED].",
+    ),
     api_key: str | None = typer.Option(
         None, "--api-key", help="Override the API key for this run only."
     ),
@@ -402,6 +407,7 @@ def run(
         visualization=vis_literal,
         untrusted_input=effective_untrusted,
         max_already_confirmed=max_already_confirmed,
+        reveal=reveal,
     )
 
 
@@ -432,6 +438,7 @@ def execute_research(
     untrusted_input: bool = False,
     model: str | None = None,
     max_already_confirmed: bool = False,
+    reveal: bool = False,
 ) -> None:
     """Run the full submit → stream/poll → render pipeline.
 
@@ -454,6 +461,9 @@ def execute_research(
     through the Max cost gate for this invocation (the ``--plan`` flow
     confirms before the plan interaction, which is itself billed at Max
     rates). It suppresses a second prompt — nothing else does.
+
+    ``reveal`` prints ``--dry-run`` secrets in the clear instead of
+    ``[REDACTED]``; it has no effect on a real run.
     """
     policy = SecurityPolicy(
         output_root=config.output_dir,
@@ -508,7 +518,7 @@ def execute_research(
         _warn_plaintext_mcp(console, ctx_for_kwargs.mcp_servers)
 
     if dry_run:
-        _print_dry_run(console, kwargs)
+        _print_dry_run(console, kwargs, reveal=reveal)
         return
 
     # Max confirmation gate — skip when the user has opted out either
@@ -1010,9 +1020,20 @@ def _print_interrupted(console: Console, interaction_id: str) -> None:
     _print_reattach_hint(console, interaction_id)
 
 
-def _print_dry_run(console: Console, kwargs: dict[str, Any]) -> None:
+def _print_dry_run(console: Console, kwargs: dict[str, Any], *, reveal: bool = False) -> None:
+    """Preview the request. Secrets are masked unless ``reveal`` is set.
+
+    These kwargs are post-``env:`` expansion, so an MCP auth header here
+    is the live token — printing it drops the secret into terminal
+    scrollback and CI logs. Same default as ``gdr config get``.
+    """
+    payload = kwargs if reveal else redact_sensitive(kwargs)
     console.print("[bold]Dry run — the following would be sent to the API:[/bold]")
-    console.print_json(json.dumps(kwargs, default=str))
+    if payload != kwargs:
+        console.print(
+            "[dim]Secret values are masked. Pass --reveal to print them in the clear.[/dim]"
+        )
+    console.print_json(json.dumps(payload, default=str))
 
 
 def _confirm_max(console: Console) -> bool:

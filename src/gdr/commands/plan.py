@@ -149,6 +149,11 @@ def approve_cmd(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the request body as JSON and exit without calling the API."
     ),
+    reveal: bool = typer.Option(
+        False,
+        "--reveal",
+        help="With --dry-run, print MCP auth headers in the clear instead of [REDACTED].",
+    ),
     api_key: str | None = typer.Option(
         None, "--api-key", help="Override the API key for this run only."
     ),
@@ -178,4 +183,5 @@ def approve_cmd(
         # Approving a plan you have already read IS the cost decision —
         # say so explicitly rather than borrowing --no-confirm's meaning.
         max_already_confirmed=True,
+        reveal=reveal,
     )
